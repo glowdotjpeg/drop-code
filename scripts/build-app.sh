@@ -20,11 +20,20 @@ for PRODUCTS in "$ROOT/.build/release" "$ROOT/.build/out/Products/Release"; do
     find "$PRODUCTS" -maxdepth 1 -type d -name '*.bundle' \
         -exec cp -R {} "$APP/Contents/Resources/" \;
 done
-codesign \
-    --force \
-    --options runtime \
-    --timestamp=none \
-    --sign "$SIGNING_IDENTITY" \
-    "$APP"
+if [ "$SIGNING_IDENTITY" = "-" ]; then
+    codesign \
+        --force \
+        --options runtime \
+        --timestamp=none \
+        --sign "$SIGNING_IDENTITY" \
+        "$APP"
+else
+    codesign \
+        --force \
+        --options runtime \
+        --timestamp \
+        --sign "$SIGNING_IDENTITY" \
+        "$APP"
+fi
 
 printf '%s\n' "$APP"

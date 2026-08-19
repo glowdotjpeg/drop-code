@@ -14,6 +14,10 @@ Ghostty.app is not required.
 - Adjust panel height and window opacity from the menu-bar settings.
 - Keep the colors and theme configured by the launched CLI.
 
+## Download
+
+Download a build from [GitHub Releases](https://github.com/R44VC0RP/drop-code/releases), unzip it, and move `DropCode.app` to Applications.
+
 ## Build
 
 Requires macOS 13 or newer, Xcode, and your chosen agent CLI on `PATH`.
