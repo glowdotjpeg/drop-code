@@ -1,0 +1,904 @@
+import AppKit
+import ApplicationServices
+import GhosttyTerminal
+import QuartzCore
+
+private let animationDuration: TimeInterval = 0.25
+private let holdDelay: TimeInterval = 0.2
+
+private enum SettingsKey {
+    static let panelHeightPercentage = "panelHeightPercentage"
+    static let backgroundOpacityPercentage = "backgroundOpacityPercentage"
+    static let launchCommand = "launchCommand"
+}
+
+private enum LauncherPreset: String, CaseIterable {
+    case openCode = "OpenCode"
+    case codex = "Codex"
+    case claude = "Claude"
+    case custom = "Custom"
+
+    var command: String? {
+        switch self {
+        case .openCode: "opencode"
+        case .codex: "codex"
+        case .claude: "claude"
+        case .custom: nil
+        }
+    }
+
+    static func matching(command: String) -> LauncherPreset {
+        allCases.first { $0.command == command } ?? .custom
+    }
+}
+
+private func eventTapCallback(
+    proxy: CGEventTapProxy,
+    type: CGEventType,
+    event: CGEvent,
+    userInfo: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    guard let userInfo else {
+        return Unmanaged.passUnretained(event)
+    }
+
+    let monitor = Unmanaged<ModifierChordMonitor>
+        .fromOpaque(userInfo)
+        .takeUnretainedValue()
+    MainActor.assumeIsolated {
+        monitor.receive(type: type, flags: event.flags)
+    }
+    return Unmanaged.passUnretained(event)
+}
+
+final class DropPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+final class TerminalContainerView: NSView {
+    override var isOpaque: Bool { false }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+@MainActor
+final class DropPanelController: NSObject {
+    private let panel: DropPanel
+    private let terminalContainer: TerminalContainerView
+    private let terminalController: TerminalController
+    private var terminalView: TerminalView?
+    private var previousApplication: NSRunningApplication?
+    private var animationGeneration = 0
+    private(set) var isVisible = false
+    private var isLatched = false
+    private var panelHeightRatio: CGFloat
+    private var backgroundOpacity: Double
+    private var launchCommand: String
+
+    override init() {
+        let defaults = UserDefaults.standard
+        let heightPercentage = defaults.object(
+            forKey: SettingsKey.panelHeightPercentage
+        ) as? Double ?? 40
+        let opacityPercentage = defaults.object(
+            forKey: SettingsKey.backgroundOpacityPercentage
+        ) as? Double ?? 90
+        let configuredLaunchCommand = defaults.string(
+            forKey: SettingsKey.launchCommand
+        ) ?? "opencode"
+        let heightRatio = CGFloat(min(max(heightPercentage, 20), 100) / 100)
+        let opacity = min(max(opacityPercentage, 0), 100) / 100
+
+        panelHeightRatio = heightRatio
+        backgroundOpacity = opacity
+        launchCommand = configuredLaunchCommand
+        let initialScreen = NSScreen.main ?? NSScreen.screens[0]
+        let initialFrame = Self.frames(
+            for: initialScreen,
+            heightRatio: heightRatio
+        ).hidden
+        panel = DropPanel(
+            contentRect: initialFrame,
+            styleMask: [.borderless, .nonactivatingPanel],
+            backing: .buffered,
+            defer: false
+        )
+        terminalContainer = TerminalContainerView(
+            frame: NSRect(origin: .zero, size: initialFrame.size)
+        )
+
+        terminalController = TerminalController(
+            configuration: Self.terminalConfiguration,
+            theme: TerminalTheme()
+        )
+
+        super.init()
+
+        panel.backgroundColor = .clear
+        panel.collectionBehavior = [
+            .canJoinAllSpaces,
+            .fullScreenAuxiliary,
+            .ignoresCycle,
+            .stationary,
+        ]
+        panel.hasShadow = false
+        panel.hidesOnDeactivate = false
+        panel.isMovable = false
+        panel.isOpaque = false
+        panel.alphaValue = opacity
+        panel.isReleasedWhenClosed = false
+        panel.level = NSWindow.Level(
+            rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 1
+        )
+        terminalContainer.autoresizingMask = [.width, .height]
+        panel.contentView = terminalContainer
+
+        rebuildTerminal()
+    }
+
+    func toggleLatched() {
+        if isVisible {
+            isLatched = false
+            setVisible(false)
+        } else {
+            isLatched = true
+            setVisible(true)
+        }
+    }
+
+    func beginMomentary() -> Bool {
+        guard !isVisible else { return false }
+        isLatched = false
+        setVisible(true)
+        return isVisible
+    }
+
+    func endMomentary(openedByGesture: Bool) {
+        guard openedByGesture, isVisible, !isLatched else { return }
+        setVisible(false)
+    }
+
+    func restartOpenCode() {
+        rebuildTerminal()
+        if isVisible {
+            focusTerminal()
+        }
+    }
+
+    var panelHeightPercentage: Double {
+        Double(panelHeightRatio * 100)
+    }
+
+    var backgroundOpacityPercentage: Double {
+        backgroundOpacity * 100
+    }
+
+    var configuredLaunchCommand: String {
+        launchCommand
+    }
+
+    func setPanelHeightPercentage(_ percentage: Double) {
+        let clamped = min(max(percentage, 20), 100)
+        panelHeightRatio = CGFloat(clamped / 100)
+        UserDefaults.standard.set(
+            clamped,
+            forKey: SettingsKey.panelHeightPercentage
+        )
+
+        let screen = panel.screen ?? targetScreen
+        let frames = Self.frames(for: screen, heightRatio: panelHeightRatio)
+        panel.setFrame(isVisible ? frames.shown : frames.hidden, display: isVisible)
+        terminalView?.fitToSize()
+    }
+
+    func setBackgroundOpacityPercentage(_ percentage: Double) {
+        let clamped = min(max(percentage, 0), 100)
+        backgroundOpacity = clamped / 100
+        UserDefaults.standard.set(
+            clamped,
+            forKey: SettingsKey.backgroundOpacityPercentage
+        )
+        panel.alphaValue = backgroundOpacity
+    }
+
+    @discardableResult
+    func setLaunchCommand(_ command: String) -> Bool {
+        let trimmed = command.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        launchCommand = trimmed
+        UserDefaults.standard.set(trimmed, forKey: SettingsKey.launchCommand)
+        restartOpenCode()
+        return true
+    }
+
+    private func setVisible(_ visible: Bool) {
+        guard visible != isVisible else { return }
+        isVisible = visible
+        animationGeneration += 1
+        let generation = animationGeneration
+        let duration = motionDuration
+
+        if visible {
+            let screen = targetScreen
+            let frames = Self.frames(for: screen, heightRatio: panelHeightRatio)
+            previousApplication = NSWorkspace.shared.frontmostApplication
+            panel.setFrame(frames.hidden, display: false)
+            terminalView?.setSurfaceVisible(true)
+            panel.orderFrontRegardless()
+            panel.makeKey()
+            NSApp.activate(ignoringOtherApps: true)
+
+            animatePanel(to: frames.shown, duration: duration, entering: true)
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isVisible else { return }
+                self.focusTerminal()
+            }
+        } else {
+            let screen = panel.screen ?? targetScreen
+            let hiddenFrame = Self.frames(
+                for: screen,
+                heightRatio: panelHeightRatio
+            ).hidden
+            animatePanel(to: hiddenFrame, duration: duration, entering: false)
+
+            DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
+                guard let self,
+                      self.animationGeneration == generation,
+                      !self.isVisible
+                else { return }
+
+                self.panel.orderOut(nil)
+                self.terminalView?.setSurfaceVisible(false)
+                self.previousApplication?.activate(options: [.activateIgnoringOtherApps])
+                self.previousApplication = nil
+            }
+        }
+    }
+
+    private func animatePanel(
+        to frame: NSRect,
+        duration: TimeInterval,
+        entering: Bool
+    ) {
+        guard duration > 0 else {
+            panel.setFrame(frame, display: true)
+            return
+        }
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = duration
+            context.timingFunction = CAMediaTimingFunction(
+                name: entering ? .easeOut : .easeIn
+            )
+            panel.animator().setFrame(frame, display: true)
+        }
+    }
+
+    private func rebuildTerminal() {
+        terminalView?.removeFromSuperview()
+
+        let terminal = TerminalView(frame: terminalContainer.bounds)
+        terminal.autoresizingMask = [.width, .height]
+        terminal.delegate = self
+        terminal.configuration = TerminalSurfaceOptions(
+            backend: .exec,
+            fontSize: 14,
+            workingDirectory: FileManager.default.homeDirectoryForCurrentUser.path,
+            envVars: [
+                "PATH": Self.commandPath,
+                "SHELL": "/bin/zsh",
+            ],
+            command: launcherScriptPath(),
+            waitAfterCommand: false,
+            context: .window,
+            resizeThrottleMilliseconds: 16
+        )
+        terminal.controller = terminalController
+        terminalContainer.addSubview(terminal)
+        terminalView = terminal
+
+        DispatchQueue.main.async { [weak self, weak terminal] in
+            guard let self, let terminal else { return }
+            terminal.fitToSize()
+            terminal.setSurfaceVisible(self.isVisible)
+        }
+    }
+
+    private func focusTerminal() {
+        guard let terminalView else { return }
+        panel.makeFirstResponder(terminalView)
+    }
+
+    private var targetScreen: NSScreen {
+        let mouse = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouse) }
+            ?? NSScreen.main
+            ?? NSScreen.screens[0]
+    }
+
+    private var motionDuration: TimeInterval {
+        NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            ? 0
+            : animationDuration
+    }
+
+    private static func frames(
+        for screen: NSScreen,
+        heightRatio: CGFloat
+    ) -> (
+        hidden: NSRect,
+        shown: NSRect
+    ) {
+        let screenFrame = screen.frame
+        let height = floor(screenFrame.height * heightRatio)
+        let shown = NSRect(
+            x: screenFrame.minX,
+            y: screenFrame.maxY - height,
+            width: screenFrame.width,
+            height: height
+        )
+        let hidden = NSRect(
+            x: shown.minX,
+            y: screenFrame.maxY,
+            width: shown.width,
+            height: shown.height
+        )
+        return (hidden, shown)
+    }
+
+    private static var terminalConfiguration: TerminalConfiguration {
+        TerminalConfiguration(startingFrom: .default) { builder in
+            builder.withFontSize(14)
+            builder.withWindowPaddingX(0)
+            builder.withWindowPaddingY(0)
+            builder.withCustom("mouse-hide-while-typing", "true")
+            builder.withCustom("scrollbar", "never")
+        }
+    }
+
+    private static var commandPath: String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let preferred = [
+            "\(home)/.bun/bin",
+            "\(home)/.local/bin",
+            "/opt/homebrew/bin",
+            "/usr/local/bin",
+            "/usr/bin",
+            "/bin",
+            "/usr/sbin",
+            "/sbin",
+        ]
+        return preferred.joined(separator: ":")
+    }
+
+    private func launcherScriptPath() -> String {
+        let directory = FileManager.default.urls(
+            for: .cachesDirectory,
+            in: .userDomainMask
+        )[0].appendingPathComponent("DropCode", isDirectory: true)
+        let scriptURL = directory.appendingPathComponent("launch-agent.zsh")
+        let escapedCommand = Self.shellQuote(launchCommand)
+        let script = """
+        #!/bin/zsh
+        /bin/zsh -lic \(escapedCommand)
+        exit_code=$?
+        printf '\\nDropCode command exited (%d). Starting a login shell.\\n' "$exit_code"
+        exec /bin/zsh -l
+        """
+
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            try script.write(to: scriptURL, atomically: true, encoding: .utf8)
+            try FileManager.default.setAttributes(
+                [.posixPermissions: 0o700],
+                ofItemAtPath: scriptURL.path
+            )
+            return scriptURL.path
+        } catch {
+            NSLog("DropCode failed to write launcher script: %@", String(describing: error))
+            return "/bin/zsh"
+        }
+    }
+
+    private static func shellQuote(_ value: String) -> String {
+        "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
+    }
+}
+
+extension DropPanelController:
+    TerminalSurfaceTitleDelegate
+{
+    func terminalDidChangeTitle(_ title: String) {
+        panel.title = title
+    }
+}
+
+@MainActor
+final class SettingsViewController: NSViewController {
+    private let panelController: DropPanelController
+    private let heightValueLabel = NSTextField(labelWithString: "")
+    private let opacityValueLabel = NSTextField(labelWithString: "")
+    private let launcherValueLabel = NSTextField(labelWithString: "")
+
+    private lazy var heightSlider = NSSlider(
+        value: panelController.panelHeightPercentage,
+        minValue: 20,
+        maxValue: 100,
+        target: self,
+        action: #selector(heightChanged)
+    )
+
+    private lazy var opacitySlider = NSSlider(
+        value: panelController.backgroundOpacityPercentage,
+        minValue: 0,
+        maxValue: 100,
+        target: self,
+        action: #selector(opacityChanged)
+    )
+
+    private lazy var launcherPopup: NSPopUpButton = {
+        let popup = NSPopUpButton(frame: .zero, pullsDown: false)
+        popup.addItems(withTitles: LauncherPreset.allCases.map(\.rawValue))
+        popup.target = self
+        popup.action = #selector(launcherPresetChanged)
+        return popup
+    }()
+
+    private lazy var commandField: NSTextField = {
+        let field = NSTextField(string: "")
+        field.placeholderString = "Shell command or script path"
+        field.target = self
+        field.action = #selector(applyLaunchCommand)
+        return field
+    }()
+
+    private lazy var applyCommandButton: NSButton = {
+        let button = NSButton(
+            title: "Apply & Restart",
+            target: self,
+            action: #selector(applyLaunchCommand)
+        )
+        button.bezelStyle = .rounded
+        return button
+    }()
+
+    init(panelController: DropPanelController) {
+        self.panelController = panelController
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func loadView() {
+        let root = NSView()
+        let commandRow = NSStackView(views: [commandField, applyCommandButton])
+        commandRow.orientation = .horizontal
+        commandRow.alignment = .centerY
+        commandRow.spacing = 8
+        commandRow.widthAnchor.constraint(equalToConstant: 320).isActive = true
+
+        let stack = NSStackView(views: [
+            settingHeader(title: "Screen height", valueLabel: heightValueLabel),
+            heightSlider,
+            settingHeader(title: "Window opacity", valueLabel: opacityValueLabel),
+            opacitySlider,
+            settingHeader(title: "Launcher", valueLabel: launcherValueLabel),
+            launcherPopup,
+            commandRow,
+        ])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 8
+        stack.setCustomSpacing(20, after: heightSlider)
+        stack.setCustomSpacing(24, after: opacitySlider)
+        stack.translatesAutoresizingMaskIntoConstraints = false
+
+        heightSlider.isContinuous = true
+        opacitySlider.isContinuous = true
+        heightSlider.widthAnchor.constraint(equalToConstant: 320).isActive = true
+        opacitySlider.widthAnchor.constraint(equalTo: heightSlider.widthAnchor).isActive = true
+        launcherPopup.widthAnchor.constraint(equalTo: heightSlider.widthAnchor).isActive = true
+
+        root.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 22),
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -22),
+        ])
+        view = root
+        syncValues()
+    }
+
+    func syncValues() {
+        guard isViewLoaded else { return }
+        heightSlider.doubleValue = panelController.panelHeightPercentage
+        opacitySlider.doubleValue = panelController.backgroundOpacityPercentage
+        commandField.stringValue = panelController.configuredLaunchCommand
+        let preset = LauncherPreset.matching(
+            command: panelController.configuredLaunchCommand
+        )
+        launcherPopup.selectItem(withTitle: preset.rawValue)
+        updateValueLabels()
+    }
+
+    @objc private func heightChanged(_ sender: NSSlider) {
+        let value = round(sender.doubleValue)
+        sender.doubleValue = value
+        panelController.setPanelHeightPercentage(value)
+        updateValueLabels()
+    }
+
+    @objc private func opacityChanged(_ sender: NSSlider) {
+        let value = round(sender.doubleValue)
+        sender.doubleValue = value
+        panelController.setBackgroundOpacityPercentage(value)
+        updateValueLabels()
+    }
+
+    @objc private func launcherPresetChanged(_ sender: NSPopUpButton) {
+        guard let title = sender.selectedItem?.title,
+              let preset = LauncherPreset(rawValue: title)
+        else { return }
+
+        if let command = preset.command {
+            commandField.stringValue = command
+        } else {
+            view.window?.makeFirstResponder(commandField)
+        }
+        updateValueLabels()
+    }
+
+    @objc private func applyLaunchCommand() {
+        guard panelController.setLaunchCommand(commandField.stringValue) else {
+            NSSound.beep()
+            return
+        }
+        syncValues()
+    }
+
+    private func settingHeader(
+        title: String,
+        valueLabel: NSTextField
+    ) -> NSStackView {
+        let titleLabel = NSTextField(labelWithString: title)
+        titleLabel.font = .systemFont(ofSize: 13, weight: .medium)
+        valueLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .regular)
+        valueLabel.textColor = .secondaryLabelColor
+
+        let spacer = NSView()
+        let row = NSStackView(views: [titleLabel, spacer, valueLabel])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.widthAnchor.constraint(equalToConstant: 320).isActive = true
+        return row
+    }
+
+    private func updateValueLabels() {
+        heightValueLabel.stringValue = String(
+            format: "%.0f%%",
+            heightSlider.doubleValue
+        )
+        opacityValueLabel.stringValue = String(
+            format: "%.0f%%",
+            opacitySlider.doubleValue
+        )
+        launcherValueLabel.stringValue = launcherPopup.titleOfSelectedItem ?? "Custom"
+    }
+}
+
+@MainActor
+final class DropCodeSettingsWindowController: NSWindowController {
+    private let settingsViewController: SettingsViewController
+
+    init(panelController: DropPanelController) {
+        settingsViewController = SettingsViewController(
+            panelController: panelController
+        )
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 368, height: 286),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "DropCode Settings"
+        window.contentViewController = settingsViewController
+        window.isReleasedWhenClosed = false
+        window.level = NSWindow.Level(
+            rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 2
+        )
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
+        super.init(window: window)
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func showSettings() {
+        settingsViewController.syncValues()
+        window?.center()
+        showWindow(nil)
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+}
+
+@MainActor
+final class ModifierChordMonitor {
+    private let panelController: DropPanelController
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+    private var pollTimer: Timer?
+    private var holdWorkItem: DispatchWorkItem?
+    private var chordIsDown = false
+    private var gestureIsValid = false
+    private var holdWasTriggered = false
+    private var openedForHold = false
+
+    init(panelController: DropPanelController) {
+        self.panelController = panelController
+    }
+
+    func start() -> Bool {
+        let timer = Timer(timeInterval: 1.0 / 60.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.pollKeyboardState()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
+
+        guard CGPreflightListenEventAccess() else {
+            return true
+        }
+
+        let mask = (CGEventMask(1) << CGEventType.flagsChanged.rawValue)
+            | (CGEventMask(1) << CGEventType.keyDown.rawValue)
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+
+        guard let eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .listenOnly,
+            eventsOfInterest: mask,
+            callback: eventTapCallback,
+            userInfo: userInfo
+        ) else {
+            return false
+        }
+
+        let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+        self.eventTap = eventTap
+        runLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: eventTap, enable: true)
+        return true
+    }
+
+    private func pollKeyboardState() {
+        let flags = CGEventSource.flagsState(.combinedSessionState)
+        receive(type: .flagsChanged, flags: flags)
+
+        guard chordIsDown else { return }
+        let modifierKeyCodes: Set<CGKeyCode> = [54, 55, 56, 57, 58, 59, 60, 61, 62, 63]
+        let hasOtherKeyDown = (0 ... 127).contains { rawCode in
+            let keyCode = CGKeyCode(rawCode)
+            return !modifierKeyCodes.contains(keyCode)
+                && CGEventSource.keyState(.combinedSessionState, key: keyCode)
+        }
+        if hasOtherKeyDown {
+            cancelGesture()
+        }
+    }
+
+    func receive(type: CGEventType, flags: CGEventFlags) {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let eventTap {
+                CGEvent.tapEnable(tap: eventTap, enable: true)
+            }
+            return
+        }
+
+        if type == .keyDown {
+            if chordIsDown {
+                cancelGesture()
+            }
+            return
+        }
+
+        guard type == .flagsChanged else { return }
+        let hasControl = flags.contains(.maskControl)
+        let hasCommand = flags.contains(.maskCommand)
+        let hasExtraModifier = flags.contains(.maskShift)
+            || flags.contains(.maskAlternate)
+        let chordIsNowDown = hasControl && hasCommand
+
+        if chordIsNowDown && !chordIsDown {
+            chordIsDown = true
+            if hasExtraModifier {
+                gestureIsValid = false
+            } else {
+                beginGesture()
+            }
+        } else if chordIsNowDown && hasExtraModifier {
+            cancelGesture()
+        } else if !chordIsNowDown && chordIsDown {
+            chordIsDown = false
+            finishGesture()
+        }
+    }
+
+    private func beginGesture() {
+        gestureIsValid = true
+        holdWasTriggered = false
+        openedForHold = false
+
+        let workItem = DispatchWorkItem { [weak self] in
+            guard let self, self.chordIsDown, self.gestureIsValid else { return }
+            self.holdWasTriggered = true
+            self.openedForHold = self.panelController.beginMomentary()
+        }
+        holdWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + holdDelay, execute: workItem)
+    }
+
+    private func finishGesture() {
+        holdWorkItem?.cancel()
+        holdWorkItem = nil
+        guard gestureIsValid else {
+            resetGesture()
+            return
+        }
+
+        if holdWasTriggered {
+            panelController.endMomentary(openedByGesture: openedForHold)
+        } else {
+            panelController.toggleLatched()
+        }
+        resetGesture()
+    }
+
+    private func cancelGesture() {
+        holdWorkItem?.cancel()
+        holdWorkItem = nil
+        gestureIsValid = false
+        if holdWasTriggered {
+            panelController.endMomentary(openedByGesture: openedForHold)
+        }
+    }
+
+    private func resetGesture() {
+        gestureIsValid = false
+        holdWasTriggered = false
+        openedForHold = false
+    }
+}
+
+@MainActor
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    private var panelController: DropPanelController?
+    private var settingsWindowController: DropCodeSettingsWindowController?
+    private var chordMonitor: ModifierChordMonitor?
+    private var toggleSignalSource: DispatchSourceSignal?
+    private var statusItem: NSStatusItem?
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        let bundleIdentifier = Bundle.main.bundleIdentifier ?? "com.ryanvogel.dropcode"
+        let hasAnotherInstance = NSRunningApplication
+            .runningApplications(withBundleIdentifier: bundleIdentifier)
+            .contains { $0.processIdentifier != ProcessInfo.processInfo.processIdentifier }
+        guard !hasAnotherInstance else {
+            NSApp.terminate(nil)
+            return
+        }
+
+        NSApp.setActivationPolicy(.accessory)
+
+        let panelController = DropPanelController()
+        self.panelController = panelController
+        settingsWindowController = DropCodeSettingsWindowController(
+            panelController: panelController
+        )
+        configureStatusItem()
+        configureToggleSignal()
+
+        let monitor = ModifierChordMonitor(panelController: panelController)
+        chordMonitor = monitor
+        if !monitor.start() {
+            requestAccessibilityPermission()
+        }
+    }
+
+    @objc private func togglePanel() {
+        panelController?.toggleLatched()
+    }
+
+    @objc private func restartOpenCode() {
+        panelController?.restartOpenCode()
+    }
+
+    @objc private func showSettings() {
+        settingsWindowController?.showSettings()
+    }
+
+    @objc private func quit() {
+        NSApp.terminate(nil)
+    }
+
+    private func configureStatusItem() {
+        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
+        item.button?.image = NSImage(
+            systemSymbolName: "terminal.fill",
+            accessibilityDescription: "DropCode"
+        )
+
+        let menu = NSMenu()
+        menu.addItem(menuItem(title: "Toggle DropCode", action: #selector(togglePanel)))
+        menu.addItem(menuItem(title: "Restart OpenCode", action: #selector(restartOpenCode)))
+        menu.addItem(
+            menuItem(
+                title: "Settings…",
+                action: #selector(showSettings),
+                key: ","
+            )
+        )
+        menu.addItem(.separator())
+        menu.addItem(menuItem(title: "Quit DropCode", action: #selector(quit), key: "q"))
+        item.menu = menu
+        statusItem = item
+    }
+
+    private func menuItem(
+        title: String,
+        action: Selector,
+        key: String = ""
+    ) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: action, keyEquivalent: key)
+        item.target = self
+        return item
+    }
+
+    private func configureToggleSignal() {
+        signal(SIGUSR1, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.panelController?.toggleLatched()
+        }
+        source.resume()
+        toggleSignalSource = source
+    }
+
+    private func requestAccessibilityPermission() {
+        let promptKey = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+        _ = AXIsProcessTrustedWithOptions([promptKey: true] as CFDictionary)
+
+        let alert = NSAlert()
+        alert.alertStyle = .informational
+        alert.messageText = "Allow DropCode to monitor Control+Command"
+        alert.informativeText = "Enable DropCode in System Settings > Privacy & Security > Accessibility, then relaunch it. The menu bar item still toggles the panel without this permission."
+        alert.addButton(withTitle: "OK")
+        NSApp.activate(ignoringOtherApps: true)
+        alert.runModal()
+    }
+}
+
+let app = NSApplication.shared
+let delegate = MainActor.assumeIsolated { AppDelegate() }
+app.delegate = delegate
+app.run()
