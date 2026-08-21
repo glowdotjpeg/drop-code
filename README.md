@@ -4,9 +4,9 @@ A warm, drop-down AI coding terminal.
 
 ![DropCode](docs/dropcode.png)
 
-DropCode embeds [`libghostty`](https://ghostty.org) and starts its terminal
-session when the app launches, so your agent is ready before the panel appears.
-Ghostty.app is not required.
+On macOS, DropCode embeds [`libghostty`](https://ghostty.org) and starts its
+terminal session when the app launches, so your agent is ready before the panel
+appears. Ghostty.app is not required.
 
 - Tap `Control+Command` to toggle the panel.
 - Hold `Control+Command` to show it until you release the keys.
@@ -24,11 +24,13 @@ emit standard OSC desktop-notification sequences.
 macOS builds are available from [GitHub Releases](https://github.com/glowdotjpeg/drop-code/releases).
 Unzip the archive and move `DropCode.app` to Applications.
 
-The Windows fork is a native C++ implementation in [`Windows`](Windows). It
-uses Win32, ConPTY, Direct2D, DirectWrite, and `libvterm`; WinUI 3 is limited to
-the settings window.
+Windows builds are available in the [Windows v0.2.0 release](https://github.com/glowdotjpeg/drop-code/releases/tag/windows-v0.2.0).
 
 ## Windows
+
+The Windows implementation is native C++ in [`Windows`](Windows), using Win32,
+ConPTY, Direct2D, DirectWrite, and `libvterm`; WinUI 3 is limited to the
+settings window.
 
 Windows releases require the matching [Windows App Runtime](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
 2.3.1 x64 runtime. Build from a Visual Studio developer environment:
