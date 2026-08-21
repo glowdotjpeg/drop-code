@@ -2,14 +2,17 @@ import AppKit
 import ApplicationServices
 import GhosttyTerminal
 import QuartzCore
+import UserNotifications
 
 private let animationDuration: TimeInterval = 0.25
 private let holdDelay: TimeInterval = 0.2
 
 private enum SettingsKey {
     static let panelHeightPercentage = "panelHeightPercentage"
+    static let panelWidthPercentage = "panelWidthPercentage"
     static let backgroundOpacityPercentage = "backgroundOpacityPercentage"
     static let launchCommand = "launchCommand"
+    static let desktopNotificationsEnabled = "desktopNotificationsEnabled"
 }
 
 private enum LauncherPreset: String, CaseIterable {
@@ -61,6 +64,7 @@ final class TerminalContainerView: NSView {
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
+        wantsLayer = true
     }
 
     @available(*, unavailable)
@@ -69,42 +73,143 @@ final class TerminalContainerView: NSView {
     }
 }
 
+final class PanelClipView: NSView {
+    override var isOpaque: Bool { false }
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        wantsLayer = true
+        layer?.masksToBounds = true
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+}
+
+final class DesktopNotificationController: NSObject,
+    UNUserNotificationCenterDelegate
+{
+    private let center = UNUserNotificationCenter.current()
+
+    override init() {
+        super.init()
+        center.delegate = self
+    }
+
+    func requestAuthorization() {
+        center.getNotificationSettings { [weak self] settings in
+            switch settings.authorizationStatus {
+            case .denied:
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.alertStyle = .informational
+                    alert.messageText = "Notifications are disabled for DropCode"
+                    alert.informativeText = "Enable DropCode in System Settings > Notifications."
+                    alert.addButton(withTitle: "OK")
+                    NSApp.activate(ignoringOtherApps: true)
+                    alert.runModal()
+                }
+
+            case .notDetermined:
+                self?.center.requestAuthorization(options: [.alert]) { _, error in
+                    if let error {
+                        NSLog(
+                            "DropCode notification authorization failed: %@",
+                            String(describing: error)
+                        )
+                    }
+                }
+
+            default:
+                break
+            }
+        }
+    }
+
+    func send(title: String, body: String) {
+        let content = UNMutableNotificationContent()
+        content.title = title.isEmpty ? "DropCode" : title
+        content.body = body
+        center.add(UNNotificationRequest(
+            identifier: UUID().uuidString,
+            content: content,
+            trigger: nil
+        )) { error in
+            if let error {
+                NSLog(
+                    "DropCode notification delivery failed: %@",
+                    String(describing: error)
+                )
+            }
+        }
+    }
+
+    func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (
+            UNNotificationPresentationOptions
+        ) -> Void
+    ) {
+        completionHandler([.banner])
+    }
+}
+
 @MainActor
 final class DropPanelController: NSObject {
     private let panel: DropPanel
+    private let clipView: PanelClipView
     private let terminalContainer: TerminalContainerView
     private let terminalController: TerminalController
+    private lazy var notificationController: DesktopNotificationController? = {
+        guard Bundle.main.bundleIdentifier != nil else { return nil }
+        return DesktopNotificationController()
+    }()
     private var terminalView: TerminalView?
     private var previousApplication: NSRunningApplication?
     private var animationGeneration = 0
     private(set) var isVisible = false
     private var isLatched = false
     private var panelHeightRatio: CGFloat
+    private var panelWidthRatio: CGFloat
     private var backgroundOpacity: Double
     private var launchCommand: String
+    private var desktopNotificationsEnabled: Bool
 
     override init() {
         let defaults = UserDefaults.standard
         let heightPercentage = defaults.object(
             forKey: SettingsKey.panelHeightPercentage
         ) as? Double ?? 40
+        let widthPercentage = defaults.object(
+            forKey: SettingsKey.panelWidthPercentage
+        ) as? Double ?? 100
         let opacityPercentage = defaults.object(
             forKey: SettingsKey.backgroundOpacityPercentage
         ) as? Double ?? 90
         let configuredLaunchCommand = defaults.string(
             forKey: SettingsKey.launchCommand
         ) ?? "opencode"
-        let heightRatio = CGFloat(min(max(heightPercentage, 20), 100) / 100)
+        let notificationsEnabled = defaults.object(
+            forKey: SettingsKey.desktopNotificationsEnabled
+        ) as? Bool ?? false
+        let heightRatio = CGFloat(min(max(heightPercentage, 10), 100) / 100)
+        let widthRatio = CGFloat(min(max(widthPercentage, 10), 100) / 100)
         let opacity = min(max(opacityPercentage, 0), 100) / 100
 
         panelHeightRatio = heightRatio
+        panelWidthRatio = widthRatio
         backgroundOpacity = opacity
         launchCommand = configuredLaunchCommand
+        desktopNotificationsEnabled = notificationsEnabled
         let initialScreen = NSScreen.main ?? NSScreen.screens[0]
-        let initialFrame = Self.frames(
+        let initialFrame = Self.panelFrame(
             for: initialScreen,
-            heightRatio: heightRatio
-        ).hidden
+            heightRatio: heightRatio,
+            widthRatio: widthRatio
+        )
         panel = DropPanel(
             contentRect: initialFrame,
             styleMask: [.borderless, .nonactivatingPanel],
@@ -112,6 +217,9 @@ final class DropPanelController: NSObject {
             defer: false
         )
         terminalContainer = TerminalContainerView(
+            frame: NSRect(origin: .zero, size: initialFrame.size)
+        )
+        clipView = PanelClipView(
             frame: NSRect(origin: .zero, size: initialFrame.size)
         )
 
@@ -138,8 +246,14 @@ final class DropPanelController: NSObject {
         panel.level = NSWindow.Level(
             rawValue: Int(CGWindowLevelForKey(.mainMenuWindow)) + 1
         )
+        clipView.autoresizingMask = [.width, .height]
         terminalContainer.autoresizingMask = [.width, .height]
-        panel.contentView = terminalContainer
+        clipView.addSubview(terminalContainer)
+        panel.contentView = clipView
+
+        if notificationsEnabled {
+            notificationController?.requestAuthorization()
+        }
 
         rebuildTerminal()
     }
@@ -177,6 +291,10 @@ final class DropPanelController: NSObject {
         Double(panelHeightRatio * 100)
     }
 
+    var panelWidthPercentage: Double {
+        Double(panelWidthRatio * 100)
+    }
+
     var backgroundOpacityPercentage: Double {
         backgroundOpacity * 100
     }
@@ -185,18 +303,29 @@ final class DropPanelController: NSObject {
         launchCommand
     }
 
+    var areDesktopNotificationsEnabled: Bool {
+        desktopNotificationsEnabled
+    }
+
     func setPanelHeightPercentage(_ percentage: Double) {
-        let clamped = min(max(percentage, 20), 100)
+        let clamped = min(max(percentage, 10), 100)
         panelHeightRatio = CGFloat(clamped / 100)
         UserDefaults.standard.set(
             clamped,
             forKey: SettingsKey.panelHeightPercentage
         )
 
-        let screen = panel.screen ?? targetScreen
-        let frames = Self.frames(for: screen, heightRatio: panelHeightRatio)
-        panel.setFrame(isVisible ? frames.shown : frames.hidden, display: isVisible)
-        terminalView?.fitToSize()
+        updatePanelGeometry()
+    }
+
+    func setPanelWidthPercentage(_ percentage: Double) {
+        let clamped = min(max(percentage, 10), 100)
+        panelWidthRatio = CGFloat(clamped / 100)
+        UserDefaults.standard.set(
+            clamped,
+            forKey: SettingsKey.panelWidthPercentage
+        )
+        updatePanelGeometry()
     }
 
     func setBackgroundOpacityPercentage(_ percentage: Double) {
@@ -207,6 +336,17 @@ final class DropPanelController: NSObject {
             forKey: SettingsKey.backgroundOpacityPercentage
         )
         panel.alphaValue = backgroundOpacity
+    }
+
+    func setDesktopNotificationsEnabled(_ enabled: Bool) {
+        desktopNotificationsEnabled = enabled
+        UserDefaults.standard.set(
+            enabled,
+            forKey: SettingsKey.desktopNotificationsEnabled
+        )
+        if enabled {
+            notificationController?.requestAuthorization()
+        }
     }
 
     @discardableResult
@@ -228,26 +368,35 @@ final class DropPanelController: NSObject {
 
         if visible {
             let screen = targetScreen
-            let frames = Self.frames(for: screen, heightRatio: panelHeightRatio)
+            let frame = Self.panelFrame(
+                for: screen,
+                heightRatio: panelHeightRatio,
+                widthRatio: panelWidthRatio
+            )
             previousApplication = NSWorkspace.shared.frontmostApplication
-            panel.setFrame(frames.hidden, display: false)
+            panel.setFrame(frame, display: false)
+            clipView.layoutSubtreeIfNeeded()
+            terminalContainer.frame = hiddenContentFrame
             terminalView?.setSurfaceVisible(true)
             panel.orderFrontRegardless()
             panel.makeKey()
             NSApp.activate(ignoringOtherApps: true)
 
-            animatePanel(to: frames.shown, duration: duration, entering: true)
+            animateContent(
+                to: clipView.bounds,
+                duration: duration,
+                entering: true
+            )
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isVisible else { return }
                 self.focusTerminal()
             }
         } else {
-            let screen = panel.screen ?? targetScreen
-            let hiddenFrame = Self.frames(
-                for: screen,
-                heightRatio: panelHeightRatio
-            ).hidden
-            animatePanel(to: hiddenFrame, duration: duration, entering: false)
+            animateContent(
+                to: hiddenContentFrame,
+                duration: duration,
+                entering: false
+            )
 
             DispatchQueue.main.asyncAfter(deadline: .now() + duration) { [weak self] in
                 guard let self,
@@ -263,13 +412,13 @@ final class DropPanelController: NSObject {
         }
     }
 
-    private func animatePanel(
+    private func animateContent(
         to frame: NSRect,
         duration: TimeInterval,
         entering: Bool
     ) {
         guard duration > 0 else {
-            panel.setFrame(frame, display: true)
+            terminalContainer.frame = frame
             return
         }
 
@@ -278,8 +427,30 @@ final class DropPanelController: NSObject {
             context.timingFunction = CAMediaTimingFunction(
                 name: entering ? .easeOut : .easeIn
             )
-            panel.animator().setFrame(frame, display: true)
+            terminalContainer.animator().frame = frame
         }
+    }
+
+    private var hiddenContentFrame: NSRect {
+        NSRect(
+            x: clipView.bounds.minX,
+            y: clipView.bounds.height,
+            width: clipView.bounds.width,
+            height: clipView.bounds.height
+        )
+    }
+
+    private func updatePanelGeometry() {
+        let screen = panel.screen ?? targetScreen
+        let frame = Self.panelFrame(
+            for: screen,
+            heightRatio: panelHeightRatio,
+            widthRatio: panelWidthRatio
+        )
+        panel.setFrame(frame, display: isVisible)
+        clipView.layoutSubtreeIfNeeded()
+        terminalContainer.frame = isVisible ? clipView.bounds : hiddenContentFrame
+        terminalView?.fitToSize()
     }
 
     private func rebuildTerminal() {
@@ -318,10 +489,44 @@ final class DropPanelController: NSObject {
     }
 
     private var targetScreen: NSScreen {
+        if let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
+           let windowInfo = CGWindowListCopyWindowInfo(
+               [.optionOnScreenOnly, .excludeDesktopElements],
+               kCGNullWindowID
+           ) as? [[String: Any]],
+           let frontWindow = windowInfo.first(where: {
+               ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value
+                   == frontmostPID
+                   && ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+           }),
+           let boundsDictionary = frontWindow[kCGWindowBounds as String] as? NSDictionary,
+           let windowBounds = CGRect(dictionaryRepresentation: boundsDictionary),
+           let screen = NSScreen.screens.max(by: {
+               Self.intersectionArea(of: $0, with: windowBounds)
+                   < Self.intersectionArea(of: $1, with: windowBounds)
+           }),
+           Self.intersectionArea(of: screen, with: windowBounds) > 0
+        {
+            return screen
+        }
+
         let mouse = NSEvent.mouseLocation
-        return NSScreen.screens.first { $0.frame.contains(mouse) }
-            ?? NSScreen.main
+        return NSScreen.main
+            ?? NSScreen.screens.first { $0.frame.contains(mouse) }
             ?? NSScreen.screens[0]
+    }
+
+    private static func intersectionArea(
+        of screen: NSScreen,
+        with windowBounds: CGRect
+    ) -> CGFloat {
+        guard let number = screen.deviceDescription[NSDeviceDescriptionKey(
+            "NSScreenNumber"
+        )] as? NSNumber else { return 0 }
+        let displayBounds = CGDisplayBounds(CGDirectDisplayID(number.uint32Value))
+        let intersection = displayBounds.intersection(windowBounds)
+        guard !intersection.isNull else { return 0 }
+        return intersection.width * intersection.height
     }
 
     private var motionDuration: TimeInterval {
@@ -330,28 +535,20 @@ final class DropPanelController: NSObject {
             : animationDuration
     }
 
-    private static func frames(
+    private static func panelFrame(
         for screen: NSScreen,
-        heightRatio: CGFloat
-    ) -> (
-        hidden: NSRect,
-        shown: NSRect
-    ) {
+        heightRatio: CGFloat,
+        widthRatio: CGFloat
+    ) -> NSRect {
         let screenFrame = screen.frame
-        let height = floor(screenFrame.height * heightRatio)
-        let shown = NSRect(
-            x: screenFrame.minX,
+        let height = max(1, floor(screenFrame.height * heightRatio))
+        let width = max(1, floor(screenFrame.width * widthRatio))
+        return NSRect(
+            x: screenFrame.midX - width / 2,
             y: screenFrame.maxY - height,
-            width: screenFrame.width,
+            width: width,
             height: height
         )
-        let hidden = NSRect(
-            x: shown.minX,
-            y: screenFrame.maxY,
-            width: shown.width,
-            height: shown.height
-        )
-        return (hidden, shown)
     }
 
     private static var terminalConfiguration: TerminalConfiguration {
@@ -417,10 +614,19 @@ final class DropPanelController: NSObject {
 }
 
 extension DropPanelController:
-    TerminalSurfaceTitleDelegate
+    TerminalSurfaceTitleDelegate,
+    TerminalSurfaceDesktopNotificationDelegate
 {
     func terminalDidChangeTitle(_ title: String) {
         panel.title = title
+    }
+
+    func terminalDidRequestDesktopNotification(title: String, body: String) {
+        guard desktopNotificationsEnabled else { return }
+        notificationController?.send(
+            title: title.isEmpty ? panel.title : title,
+            body: body
+        )
     }
 }
 
@@ -428,12 +634,13 @@ extension DropPanelController:
 final class SettingsViewController: NSViewController {
     private let panelController: DropPanelController
     private let heightValueLabel = NSTextField(labelWithString: "")
+    private let widthValueLabel = NSTextField(labelWithString: "")
     private let opacityValueLabel = NSTextField(labelWithString: "")
     private let launcherValueLabel = NSTextField(labelWithString: "")
 
     private lazy var heightSlider = NSSlider(
         value: panelController.panelHeightPercentage,
-        minValue: 20,
+        minValue: 0,
         maxValue: 100,
         target: self,
         action: #selector(heightChanged)
@@ -446,6 +653,29 @@ final class SettingsViewController: NSViewController {
         target: self,
         action: #selector(opacityChanged)
     )
+
+    private lazy var widthSlider = NSSlider(
+        value: panelController.panelWidthPercentage,
+        minValue: 0,
+        maxValue: 100,
+        target: self,
+        action: #selector(widthChanged)
+    )
+
+    private lazy var notificationsCheckbox = NSButton(
+        checkboxWithTitle: "Desktop notifications",
+        target: self,
+        action: #selector(notificationsChanged)
+    )
+
+    private let notificationHelpLabel: NSTextField = {
+        let label = NSTextField(
+            wrappingLabelWithString: "For OpenCode, enable Attention in OpenCode settings. Alerts appear when DropCode is unfocused."
+        )
+        label.font = .systemFont(ofSize: 11)
+        label.textColor = .secondaryLabelColor
+        return label
+    }()
 
     private lazy var launcherPopup: NSPopUpButton = {
         let popup = NSPopUpButton(frame: .zero, pullsDown: false)
@@ -494,8 +724,12 @@ final class SettingsViewController: NSViewController {
         let stack = NSStackView(views: [
             settingHeader(title: "Screen height", valueLabel: heightValueLabel),
             heightSlider,
+            settingHeader(title: "Screen width", valueLabel: widthValueLabel),
+            widthSlider,
             settingHeader(title: "Window opacity", valueLabel: opacityValueLabel),
             opacitySlider,
+            notificationsCheckbox,
+            notificationHelpLabel,
             settingHeader(title: "Launcher", valueLabel: launcherValueLabel),
             launcherPopup,
             commandRow,
@@ -504,14 +738,19 @@ final class SettingsViewController: NSViewController {
         stack.alignment = .leading
         stack.spacing = 8
         stack.setCustomSpacing(20, after: heightSlider)
+        stack.setCustomSpacing(20, after: widthSlider)
         stack.setCustomSpacing(24, after: opacitySlider)
+        stack.setCustomSpacing(24, after: notificationHelpLabel)
         stack.translatesAutoresizingMaskIntoConstraints = false
 
         heightSlider.isContinuous = true
+        widthSlider.isContinuous = true
         opacitySlider.isContinuous = true
         heightSlider.widthAnchor.constraint(equalToConstant: 320).isActive = true
+        widthSlider.widthAnchor.constraint(equalTo: heightSlider.widthAnchor).isActive = true
         opacitySlider.widthAnchor.constraint(equalTo: heightSlider.widthAnchor).isActive = true
         launcherPopup.widthAnchor.constraint(equalTo: heightSlider.widthAnchor).isActive = true
+        notificationHelpLabel.widthAnchor.constraint(equalTo: heightSlider.widthAnchor).isActive = true
 
         root.addSubview(stack)
         NSLayoutConstraint.activate([
@@ -527,7 +766,11 @@ final class SettingsViewController: NSViewController {
     func syncValues() {
         guard isViewLoaded else { return }
         heightSlider.doubleValue = panelController.panelHeightPercentage
+        widthSlider.doubleValue = panelController.panelWidthPercentage
         opacitySlider.doubleValue = panelController.backgroundOpacityPercentage
+        notificationsCheckbox.state = panelController.areDesktopNotificationsEnabled
+            ? .on
+            : .off
         commandField.stringValue = panelController.configuredLaunchCommand
         let preset = LauncherPreset.matching(
             command: panelController.configuredLaunchCommand
@@ -537,7 +780,7 @@ final class SettingsViewController: NSViewController {
     }
 
     @objc private func heightChanged(_ sender: NSSlider) {
-        let value = round(sender.doubleValue)
+        let value = max(10, round(sender.doubleValue))
         sender.doubleValue = value
         panelController.setPanelHeightPercentage(value)
         updateValueLabels()
@@ -548,6 +791,17 @@ final class SettingsViewController: NSViewController {
         sender.doubleValue = value
         panelController.setBackgroundOpacityPercentage(value)
         updateValueLabels()
+    }
+
+    @objc private func widthChanged(_ sender: NSSlider) {
+        let value = max(10, round(sender.doubleValue))
+        sender.doubleValue = value
+        panelController.setPanelWidthPercentage(value)
+        updateValueLabels()
+    }
+
+    @objc private func notificationsChanged(_ sender: NSButton) {
+        panelController.setDesktopNotificationsEnabled(sender.state == .on)
     }
 
     @objc private func launcherPresetChanged(_ sender: NSPopUpButton) {
@@ -593,6 +847,10 @@ final class SettingsViewController: NSViewController {
             format: "%.0f%%",
             heightSlider.doubleValue
         )
+        widthValueLabel.stringValue = String(
+            format: "%.0f%%",
+            widthSlider.doubleValue
+        )
         opacityValueLabel.stringValue = String(
             format: "%.0f%%",
             opacitySlider.doubleValue
@@ -610,7 +868,7 @@ final class DropCodeSettingsWindowController: NSWindowController {
             panelController: panelController
         )
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 368, height: 286),
+            contentRect: NSRect(x: 0, y: 0, width: 368, height: 400),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
