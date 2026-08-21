@@ -141,6 +141,7 @@ private:
     HANDLE readerThread_ = nullptr;
     HANDLE writerThread_ = nullptr;
     HANDLE childProcess_ = nullptr;
+    HANDLE childJob_ = nullptr;
 
     VTerm* vt_ = nullptr;
     VTermScreen* screen_ = nullptr;

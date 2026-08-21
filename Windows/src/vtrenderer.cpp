@@ -107,6 +107,15 @@ void AppendCodePoint(std::wstring& text, uint32_t codepoint) {
     text.push_back(static_cast<wchar_t>(0xDC00 + (codepoint & 0x3FF)));
 }
 
+D2D1_RECT_F PixelAlignedRect(float left, float top, float right,
+                             float bottom) {
+    // Cell advances are fractional for Cascadia Mono at most DPI values.
+    // Outward rounding makes neighboring cell fills share/overlap their
+    // rasterized edge instead of exposing a one-pixel strip of the base fill.
+    return D2D1::RectF(std::floor(left), std::floor(top), std::ceil(right),
+                       std::ceil(bottom));
+}
+
 }
 
 TermRenderer::~TermRenderer() {
@@ -313,15 +322,15 @@ void TermRenderer::DrawCellText(int row, int col, int runWidth, float topOffset,
     if (underline != VTERM_UNDERLINE_OFF && brush) {
         const float lineHeight = std::max(1.0f, cellHeight_ / 14.0f);
         target_->FillRectangle(
-            D2D1::RectF(x, y + baselineOffset_ + lineHeight * 0.5f,
-                        x + textWidth,
-                        y + baselineOffset_ + lineHeight * 1.5f),
+            PixelAlignedRect(x, y + baselineOffset_ + lineHeight * 0.5f,
+                             x + textWidth,
+                             y + baselineOffset_ + lineHeight * 1.5f),
             brush);
         if (underline == VTERM_UNDERLINE_DOUBLE) {
             target_->FillRectangle(
-                D2D1::RectF(x, y + baselineOffset_ + lineHeight * 2.0f,
-                            x + textWidth,
-                            y + baselineOffset_ + lineHeight * 3.0f),
+                PixelAlignedRect(x, y + baselineOffset_ + lineHeight * 2.0f,
+                                 x + textWidth,
+                                 y + baselineOffset_ + lineHeight * 3.0f),
                 brush);
         }
     }
@@ -329,7 +338,8 @@ void TermRenderer::DrawCellText(int row, int col, int runWidth, float topOffset,
         const float lineHeight = std::max(1.0f, cellHeight_ / 14.0f);
         const float strikeY = y + baselineOffset_ * 0.62f;
         target_->FillRectangle(
-            D2D1::RectF(x, strikeY, x + textWidth, strikeY + lineHeight), brush);
+            PixelAlignedRect(x, strikeY, x + textWidth, strikeY + lineHeight),
+            brush);
     }
 }
 
@@ -340,7 +350,8 @@ void TermRenderer::DrawCursor(int row, int col, float topOffset) {
     ID2D1SolidColorBrush* brush = Brush(kDefaultFg[0], kDefaultFg[1], kDefaultFg[2]);
     if (!brush) return;
     target_->FillRectangle(
-        D2D1::RectF(x, y, x + static_cast<float>(cellWidth_), y + cellHeight_),
+        PixelAlignedRect(x, y, x + static_cast<float>(cellWidth_),
+                         y + cellHeight_),
         brush);
 }
 
@@ -488,7 +499,8 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
                 ID2D1SolidColorBrush* bgBrush = Brush(run.br, run.bg, run.bb);
                 if (bgBrush) {
                     target_->FillRectangle(
-                        D2D1::RectF(x, y, x + w, y + cellHeight_), bgBrush);
+                        PixelAlignedRect(x, y, x + w, y + cellHeight_),
+                        bgBrush);
                 }
             }
         }
@@ -506,7 +518,7 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
                     const float endX =
                         static_cast<float>(selectionEnd) * cellWidth_;
                     target_->FillRectangle(
-                        D2D1::RectF(x, y, endX, y + cellHeight_),
+                        PixelAlignedRect(x, y, endX, y + cellHeight_),
                         selectionBrush);
                 }
             }

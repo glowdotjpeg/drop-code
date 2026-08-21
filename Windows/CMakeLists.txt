@@ -191,6 +191,7 @@ target_link_libraries(DropCode PRIVATE
   libvterm
   d2d1
   dwrite
+  winmm
   dxgi
   user32
   gdi32

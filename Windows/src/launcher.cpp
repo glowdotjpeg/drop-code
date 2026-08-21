@@ -8,6 +8,22 @@
 namespace dc::launcher {
 namespace {
 
+std::string Utf8(const std::wstring& value) {
+    if (value.empty()) return {};
+    const int size = WideCharToMultiByte(
+        CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+        static_cast<int>(value.size()), nullptr, 0, nullptr, nullptr);
+    if (size <= 0) return {};
+
+    std::string result(static_cast<size_t>(size), '\0');
+    if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, value.data(),
+                            static_cast<int>(value.size()), result.data(), size,
+                            nullptr, nullptr) != size) {
+        return {};
+    }
+    return result;
+}
+
 std::wstring EscapeBatch(const std::wstring& command) {
     std::wstring escaped;
     escaped.reserve(command.size() + 8);
@@ -34,7 +50,9 @@ std::wstring EscapeBatch(const std::wstring& command) {
 }
 
 bool WriteScript(const std::wstring& path, const std::wstring& script) {
-    if (script.size() > (std::numeric_limits<DWORD>::max() / sizeof(wchar_t))) {
+    const std::string utf8 = Utf8(script);
+    if (utf8.empty() ||
+        utf8.size() > (std::numeric_limits<DWORD>::max() - 3ULL)) {
         return false;
     }
 
@@ -42,14 +60,16 @@ bool WriteScript(const std::wstring& path, const std::wstring& script) {
                               CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
     if (file == INVALID_HANDLE_VALUE) return false;
 
-    const wchar_t bom = static_cast<wchar_t>(0xFEFF);
+    constexpr unsigned char kUtf8Bom[] = {0xEF, 0xBB, 0xBF};
     DWORD written = 0;
-    const DWORD scriptBytes = static_cast<DWORD>(script.size() * sizeof(wchar_t));
-    const bool wroteBom = WriteFile(file, &bom, sizeof(bom), &written, nullptr) &&
-                          written == sizeof(bom);
-    const bool wroteScript =
-        wroteBom && WriteFile(file, script.data(), scriptBytes, &written, nullptr) &&
-        written == scriptBytes;
+    const DWORD scriptBytes = static_cast<DWORD>(utf8.size());
+    const bool wroteBom = WriteFile(file, kUtf8Bom, sizeof(kUtf8Bom), &written,
+                                    nullptr) &&
+                          written == sizeof(kUtf8Bom);
+    const bool wroteScript = wroteBom &&
+                             WriteFile(file, utf8.data(), scriptBytes, &written,
+                                       nullptr) &&
+                             written == scriptBytes;
     CloseHandle(file);
     return wroteScript;
 }
@@ -101,9 +121,8 @@ std::wstring ScriptPath(const std::wstring& launchCommand,
         L"\r\n"
         L"set \"exit_code=%errorlevel%\"\r\n"
         L"echo.\r\n"
-        L"echo DropCode command exited (%exit_code%). Starting a shell.\r\n"
-        L"cmd\r\n"
-        L"exit /b %exit_code%\r\n";
+        L"echo DropCode command exited (%exit_code%).\r\n"
+        L"endlocal & exit /b %exit_code%\r\n";
 
     const std::wstring scriptPath = dir + L"\\launch-" +
                                      std::to_wstring(sessionId) + L".cmd";

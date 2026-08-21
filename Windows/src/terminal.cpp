@@ -6,6 +6,7 @@ namespace dc::terminal {
 namespace {
 
 constexpr int kPipeBufferSize = 64 * 1024;
+constexpr int kReadBufferSize = 16 * 1024;
 
 std::string Utf8(const std::wstring& wide) {
     if (wide.empty()) return {};
@@ -114,25 +115,53 @@ bool Terminal::Start(const std::wstring& launchCommand,
         Stop();
         return false;
     }
-    std::wstring commandLine = L"cmd.exe /d /c call \"" + scriptPath + L"\"";
+    std::wstring commandLine = L"cmd.exe /d /k call \"" + scriptPath + L"\"";
+
+    HANDLE childJob = CreateJobObjectW(nullptr, nullptr);
+    JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo{};
+    jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+    if (!childJob || !SetInformationJobObject(
+                         childJob, JobObjectExtendedLimitInformation, &jobInfo,
+                         sizeof(jobInfo))) {
+        if (childJob) CloseHandle(childJob);
+        DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
+        Stop();
+        return false;
+    }
 
     PROCESS_INFORMATION processInfo{};
     if (ok) {
         wchar_t* mutableCommandLine = commandLine.data();
         ok = CreateProcessW(
             nullptr, mutableCommandLine, nullptr, nullptr, FALSE,
-            EXTENDED_STARTUPINFO_PRESENT, nullptr, workingDirectory.c_str(),
-            &startupInfo.StartupInfo, &processInfo);
+            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, nullptr,
+            workingDirectory.c_str(), &startupInfo.StartupInfo, &processInfo);
     }
     DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
     startupInfo.lpAttributeList = nullptr;
 
     if (!ok) {
+        CloseHandle(childJob);
         Stop();
         return false;
     }
 
-    childProcess_ = processInfo.hProcess;
+    if (!AssignProcessToJobObject(childJob, processInfo.hProcess) ||
+        ResumeThread(processInfo.hThread) == static_cast<DWORD>(-1)) {
+        TerminateProcess(processInfo.hProcess, 0);
+        WaitForSingleObject(processInfo.hProcess, 500);
+        CloseHandle(processInfo.hThread);
+        CloseHandle(processInfo.hProcess);
+        CloseHandle(childJob);
+        Stop();
+        return false;
+    }
+
+    {
+        std::lock_guard lock(mutex_);
+        childProcess_ = processInfo.hProcess;
+        childJob_ = childJob;
+    }
     CloseHandle(processInfo.hThread);
     CloseHandle(inRead_);
     CloseHandle(outWrite_);
@@ -187,6 +216,8 @@ void Terminal::Stop() {
     HPCON hpc = nullptr;
     HANDLE readerThread = nullptr;
     HANDLE writerThread = nullptr;
+    HANDLE childProcess = nullptr;
+    HANDLE childJob = nullptr;
     {
         std::lock_guard lock(mutex_);
         hpc = hpc_;
@@ -197,15 +228,23 @@ void Terminal::Stop() {
         writerThread = writerThread_;
         readerThread_ = nullptr;
         writerThread_ = nullptr;
+        childProcess = childProcess_;
+        childProcess_ = nullptr;
+        childJob = childJob_;
+        childJob_ = nullptr;
     }
     inputCondition_.notify_all();
+    if (childJob) {
+        if (!TerminateJobObject(childJob, 0) && childProcess) {
+            TerminateProcess(childProcess, 0);
+        }
+    } else if (childProcess) {
+        TerminateProcess(childProcess, 0);
+    }
     if (hpc) {
         ClosePseudoConsole(hpc);
     }
 
-    if (childProcess_) {
-        TerminateProcess(childProcess_, 0);
-    }
     for (HANDLE thread : {readerThread, writerThread}) {
         if (!thread) continue;
         CancelSynchronousIo(thread);
@@ -221,10 +260,6 @@ void Terminal::Stop() {
         if (outRead_) {
             CloseHandle(outRead_);
             outRead_ = nullptr;
-        }
-        if (childProcess_) {
-            CloseHandle(childProcess_);
-            childProcess_ = nullptr;
         }
         if (inWrite_) {
             CloseHandle(inWrite_);
@@ -251,6 +286,8 @@ void Terminal::Stop() {
         cursorVisible_ = true;
         damaged_ = false;
     }
+    if (childJob) CloseHandle(childJob);
+    if (childProcess) CloseHandle(childProcess);
 }
 
 void Terminal::Resize(int cols, int rows) {
@@ -419,7 +456,7 @@ DWORD WINAPI Terminal::ReaderThreadProc(LPVOID param) {
 void Terminal::ReaderLoop() {
     const HANDLE readHandle = outRead_;
     if (!readHandle) return;
-    char buf[4096];
+    char buf[kReadBufferSize];
     for (;;) {
         DWORD n = 0;
         BOOL ok = ReadFile(readHandle, buf, sizeof(buf), &n, nullptr);

@@ -1,5 +1,7 @@
 #include "panel.h"
 
+#include <mmsystem.h>
+
 #include <algorithm>
 #include <cmath>
 #include <thread>
@@ -18,6 +20,7 @@ constexpr UINT kTerminalUpdateMessage = WM_APP + 1;
 constexpr UINT kTabStartedMessage = WM_APP + 3;
 constexpr UINT kTabFailedMessage = WM_APP + 4;
 constexpr UINT kTabExitedMessage = WM_APP + 5;
+constexpr UINT kChordInputReleasedMessage = WM_APP + 6;
 constexpr int kTabBarHeight = 36;
 
 float EaseOutCubic(float t) {
@@ -169,13 +172,13 @@ void PostTerminalInvalidation(
     if (!lifetime || !lifetime->alive.load()) return;
 
     bool expected = false;
-    if (!updateGate->messagePosted.compare_exchange_strong(expected, true)) {
+    if (!updateGate->updateScheduled.compare_exchange_strong(expected, true)) {
         return;
     }
 
     const HWND hwnd = lifetime->hwnd.load();
     if (!hwnd || !PostMessageW(hwnd, kTerminalUpdateMessage, 0, 0)) {
-        updateGate->messagePosted.store(false);
+        updateGate->updateScheduled.store(false);
     }
 }
 
@@ -274,11 +277,16 @@ void Panel::Destroy() {
         selecting_ = false;
     }
     chordMonitor_.Stop();
-    if (hwnd_) KillTimer(hwnd_, kAnimationTimerId);
+    if (hwnd_) {
+        KillTimer(hwnd_, kAnimationTimerId);
+        KillTimer(hwnd_, kTerminalFrameTimerId);
+    }
     animating_ = false;
+    terminalFramePending_ = false;
+    updateGate_->updateScheduled.store(false);
+    ReleaseAnimationTimerResolution();
     lifetime_->alive.store(false);
     lifetime_->hwnd.store(nullptr);
-    updateGate_->messagePosted.store(false);
     for (auto& tab : tabs_) StopTabAsync(tab);
     tabs_.clear();
     activeTab_ = 0;
@@ -356,9 +364,18 @@ LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case kTerminalUpdateMessage:
-            updateGate_->messagePosted.store(false);
             if (!wParam || (ActiveTab() && ActiveTab()->id == wParam)) {
-                InvalidateRect(hwnd_, nullptr, FALSE);
+                if (!terminalFramePending_) {
+                    terminalFramePending_ = true;
+                    if (SetTimer(hwnd_, kTerminalFrameTimerId,
+                                 AnimationTimerInterval(hwnd_), nullptr) == 0) {
+                        terminalFramePending_ = false;
+                        updateGate_->updateScheduled.store(false);
+                        InvalidateRect(hwnd_, nullptr, FALSE);
+                    }
+                }
+            } else {
+                updateGate_->updateScheduled.store(false);
             }
             return 0;
 
@@ -389,7 +406,17 @@ LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
         }
 
         case WM_HOTKEY:
+            // A translated key message can already be queued when the
+            // gesture callback runs. Keep the open chord out of the PTY until
+            // the gesture has completed and this message queue catches up.
+            chordInputSuppressed_ = true;
+            suppressNextChar_ = false;
             chordMonitor_.OnHotkey();
+            return 0;
+
+        case kChordInputReleasedMessage:
+            chordInputSuppressed_ = false;
+            suppressNextChar_ = false;
             return 0;
 
         case WM_TIMER:
@@ -397,6 +424,11 @@ LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                 AnimationTick();
             } else if (wParam == hotkey::ChordMonitor::kChordPollTimerId) {
                 chordMonitor_.OnPollTick();
+            } else if (wParam == kTerminalFrameTimerId) {
+                KillTimer(hwnd_, kTerminalFrameTimerId);
+                terminalFramePending_ = false;
+                updateGate_->updateScheduled.store(false);
+                InvalidateRect(hwnd_, nullptr, FALSE);
             }
             return 0;
 
@@ -607,8 +639,14 @@ void Panel::SetVisible(bool visible) {
                          SWP_NOACTIVATE);
         }
         ShowWindow(hwnd_, SW_SHOWNOACTIVATE);
-        SetForegroundWindow(hwnd_);
-        SetFocus(hwnd_);
+        // A hold gesture opens the panel while Ctrl+Alt+T is still down.
+        // Activating the terminal at that point lets the chord's translated
+        // characters enter the PTY. Tap gestures are finished before this
+        // path runs, so they can activate normally.
+        if (!chordMonitor_.IsChordDown()) {
+            SetForegroundWindow(hwnd_);
+            SetFocus(hwnd_);
+        }
         BeginAnimation(frames.shown.top, true);
         ResizeTerminal();
     } else {
@@ -1110,6 +1148,7 @@ void Panel::PaintTabBar(HDC dc) {
 
 void Panel::OnTapToggle() {
     ToggleLatched();
+    if (hwnd_) PostMessageW(hwnd_, kChordInputReleasedMessage, 0, 0);
 }
 
 bool Panel::OnHoldStart() {
@@ -1118,10 +1157,12 @@ bool Panel::OnHoldStart() {
 
 void Panel::OnHoldEnd(bool opened) {
     EndMomentary(opened);
+    if (hwnd_) PostMessageW(hwnd_, kChordInputReleasedMessage, 0, 0);
 }
 
 void Panel::OnCancel() {
     if (isVisible_ && !isLatched_) SetVisible(false);
+    if (hwnd_) PostMessageW(hwnd_, kChordInputReleasedMessage, 0, 0);
 }
 
 void Panel::BeginAnimation(int toY, bool entering) {
@@ -1140,6 +1181,7 @@ void Panel::BeginAnimation(int toY, bool entering) {
             RestorePreviousForeground();
         }
         animating_ = false;
+        ReleaseAnimationTimerResolution();
         return;
     }
     animating_ = true;
@@ -1148,7 +1190,22 @@ void Panel::BeginAnimation(int toY, bool entering) {
     animEndY_ = toY;
     animLeft_ = current.left;
     animStartCounter_ = AnimationCounter();
-    SetTimer(hwnd_, kAnimationTimerId, AnimationTimerInterval(hwnd_), nullptr);
+    if (!animationTimerResolutionActive_ &&
+        timeBeginPeriod(1) == TIMERR_NOERROR) {
+        animationTimerResolutionActive_ = true;
+    }
+    if (SetTimer(hwnd_, kAnimationTimerId, AnimationTimerInterval(hwnd_),
+                 nullptr) == 0) {
+        animating_ = false;
+        SetWindowPos(hwnd_, HWND_TOPMOST, current.left, toY, 0, 0,
+                     SWP_NOSIZE | SWP_NOACTIVATE);
+        if (!entering) {
+            ShowWindow(hwnd_, SW_HIDE);
+            RestorePreviousForeground();
+        }
+        ReleaseAnimationTimerResolution();
+        return;
+    }
     AnimationTick();
 }
 
@@ -1175,7 +1232,14 @@ void Panel::AnimationTick() {
             ShowWindow(hwnd_, SW_HIDE);
             RestorePreviousForeground();
         }
+        ReleaseAnimationTimerResolution();
     }
+}
+
+void Panel::ReleaseAnimationTimerResolution() {
+    if (!animationTimerResolutionActive_) return;
+    timeEndPeriod(1);
+    animationTimerResolutionActive_ = false;
 }
 
 void Panel::ApplyOpacity() {
@@ -1223,6 +1287,10 @@ void Panel::HandleKeyDown(UINT vk, bool sysKey) {
     TabSession* tab = ActiveTab();
     if (!tab || !tab->terminal) return;
     auto& terminal = *tab->terminal;
+
+    // Do not feed the global open chord into the terminal if focus was
+    // already transferred before Windows finished dispatching its messages.
+    if (chordInputSuppressed_ || chordMonitor_.IsChordDown()) return;
 
     const VTermModifier mods = CurrentModifiers();
     const bool ctrl = (mods & VTERM_MOD_CTRL) != 0;
@@ -1414,6 +1482,7 @@ void Panel::HandleChar(wchar_t ch) {
         suppressNextChar_ = false;
         return;
     }
+    if (chordInputSuppressed_ || chordMonitor_.IsChordDown()) return;
     TabSession* tab = ActiveTab();
     if (ch == 0x03 && tab && tab->terminal && tab->selection.active &&
         (CurrentModifiers() & VTERM_MOD_CTRL) != 0) {

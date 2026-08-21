@@ -26,10 +26,11 @@ struct LifetimeToken {
 };
 
 struct UpdateGate {
-    std::atomic<bool> messagePosted{false};
+    std::atomic<bool> updateScheduled{false};
 };
 
 constexpr UINT kAnimationTimerId = 1;
+constexpr UINT kTerminalFrameTimerId = 3;
 constexpr UINT kAnimationDurationMs = 140;
 constexpr UINT kAnimationTimerIntervalMs = 8;
 constexpr UINT kMinHeightPercent = 20;
@@ -78,6 +79,7 @@ private:
     void SetVisible(bool visible);
     void BeginAnimation(int toY, bool entering);
     void AnimationTick();
+    void ReleaseAnimationTimerResolution();
     void ApplyOpacity();
     void ResizeTerminal();
     void ResizeTabBar();
@@ -164,8 +166,11 @@ private:
     int animEndY_ = 0;
     int animLeft_ = 0;
     LONGLONG animStartCounter_ = 0;
+    bool terminalFramePending_ = false;
+    bool animationTimerResolutionActive_ = false;
 
     bool selecting_ = false;
+    bool chordInputSuppressed_ = false;
     bool suppressNextChar_ = false;
     wchar_t pendingHighSurrogate_ = 0;
 };

@@ -23,6 +23,7 @@ public:
 
     void OnHotkey();
     void OnPollTick();
+    bool IsChordDown() const { return chordIsDown_; }
 
     static constexpr UINT kChordPollTimerId = 2;
 
