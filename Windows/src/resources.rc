@@ -7,8 +7,8 @@ IDR_APP_MANIFEST RT_MANIFEST "app.manifest"
 IDR_SETTINGS_XAML RCDATA "settings.xaml"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,1,0,0
- PRODUCTVERSION 0,1,0,0
+ FILEVERSION 0,2,0,0
+ PRODUCTVERSION 0,2,0,0
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -25,11 +25,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "DropCode"
             VALUE "FileDescription", "DropCode"
-             VALUE "FileVersion", "0.1.0.0"
+             VALUE "FileVersion", "0.2.0.0"
             VALUE "InternalName", "DropCode"
             VALUE "OriginalFilename", "DropCode.exe"
             VALUE "ProductName", "DropCode"
-             VALUE "ProductVersion", "0.1.0.0"
+             VALUE "ProductVersion", "0.2.0.0"
         END
     END
     BLOCK "VarFileInfo"

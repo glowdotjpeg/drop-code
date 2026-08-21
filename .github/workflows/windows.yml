@@ -23,7 +23,7 @@ jobs:
       - name: Package
         shell: pwsh
         run: |
-          $version = if ($env:GITHUB_REF_NAME -match '^(?:windows-)?v(.+)$') { $Matches[1] } else { '0.1.0' }
+          $version = if ($env:GITHUB_REF_NAME -match '^(?:windows-)?v(.+)$') { $Matches[1] } else { '0.2.0' }
           .\Windows\scripts\package-release.ps1 -Version $version
 
       - name: Upload artifact
