@@ -1,6 +1,6 @@
 # DropCode
 
-A warm, drop-down AI coding terminal for macOS.
+A warm, drop-down AI coding terminal.
 
 ![DropCode](docs/dropcode.png)
 
@@ -16,9 +16,26 @@ Ghostty.app is not required.
 
 ## Download
 
-Download a build from [GitHub Releases](https://github.com/R44VC0RP/drop-code/releases), unzip it, and move `DropCode.app` to Applications.
+macOS builds are available from [GitHub Releases](https://github.com/glowdotjpeg/drop-code/releases).
+Unzip the archive and move `DropCode.app` to Applications.
+
+The Windows fork is a native C++ implementation in [`Windows`](Windows). It
+uses Win32, ConPTY, Direct2D, DirectWrite, and `libvterm`; WinUI 3 is limited to
+the settings window.
+
+## Windows
+
+Windows releases require the matching [Windows App Runtime](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
+2.3.1 x64 runtime. Build from a Visual Studio developer environment:
+
+```powershell
+.\Windows\scripts\build.ps1
+.\Windows\scripts\package-release.ps1
+```
 
 ## Build
+
+### macOS
 
 Requires macOS 13 or newer, Xcode, and your chosen agent CLI on `PATH`.
 

@@ -1,0 +1,168 @@
+<Grid xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+      xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+      x:Name="SettingsRoot"
+      Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+    <Grid Padding="24,22,24,22"
+          RowSpacing="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+        </Grid.RowDefinitions>
+
+        <StackPanel Grid.Row="0"
+                    Spacing="3">
+            <TextBlock Text="Settings"
+                       FontSize="26"
+                       FontWeight="SemiBold"
+                       Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+            <TextBlock Text="Tune the panel and the defaults used for new sessions."
+                       TextWrapping="Wrap"
+                       FontSize="13"
+                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+        </StackPanel>
+
+        <Grid Grid.Row="1"
+              ColumnSpacing="16"
+              VerticalAlignment="Top">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="0.92*" />
+                <ColumnDefinition Width="1.08*" />
+            </Grid.ColumnDefinitions>
+
+            <StackPanel Grid.Column="0"
+                        Spacing="16">
+                <Border Padding="16"
+                        CornerRadius="8"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                    <StackPanel Spacing="14">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Panel"
+                                       FontSize="18"
+                                       FontWeight="SemiBold"
+                                       Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="Changes here apply as you make them."
+                                       TextWrapping="Wrap"
+                                       FontSize="12"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+
+                        <Slider x:Name="HeightSlider"
+                                Header="Panel height"
+                                Minimum="20"
+                                Maximum="100"
+                                StepFrequency="1"
+                                SmallChange="1"
+                                LargeChange="10"
+                                AutomationProperties.Name="Panel height percentage" />
+                        <Slider x:Name="OpacitySlider"
+                                Header="Window opacity"
+                                Minimum="0"
+                                Maximum="100"
+                                StepFrequency="1"
+                                SmallChange="1"
+                                LargeChange="10"
+                                AutomationProperties.Name="Window opacity percentage" />
+                    </StackPanel>
+                </Border>
+
+                <Border Padding="16"
+                        CornerRadius="8"
+                        Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                        BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                        BorderThickness="1">
+                    <StackPanel Spacing="12">
+                        <StackPanel Spacing="2">
+                            <TextBlock Text="Appearance"
+                                       FontSize="18"
+                                       FontWeight="SemiBold"
+                                       Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                            <TextBlock Text="Follow Windows, or choose a theme for this window."
+                                       TextWrapping="Wrap"
+                                       FontSize="12"
+                                       Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                        </StackPanel>
+
+                        <ComboBox x:Name="ThemeCombo"
+                                  Header="Theme"
+                                  HorizontalAlignment="Stretch"
+                                  AutomationProperties.Name="Theme">
+                            <ComboBoxItem Content="Use Windows setting" />
+                            <ComboBoxItem Content="Light" />
+                            <ComboBoxItem Content="Dark" />
+                        </ComboBox>
+                    </StackPanel>
+                </Border>
+            </StackPanel>
+
+            <Border Grid.Column="1"
+                    Padding="16"
+                    CornerRadius="8"
+                    Background="{ThemeResource CardBackgroundFillColorDefaultBrush}"
+                    BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}"
+                    BorderThickness="1">
+                <StackPanel Spacing="12">
+                    <StackPanel Spacing="2">
+                        <TextBlock Text="Session defaults"
+                                   FontSize="18"
+                                   FontWeight="SemiBold"
+                                   Foreground="{ThemeResource TextFillColorPrimaryBrush}" />
+                        <TextBlock Text="Used when starting or restarting a session."
+                                   TextWrapping="Wrap"
+                                   FontSize="12"
+                                   Foreground="{ThemeResource TextFillColorSecondaryBrush}" />
+                    </StackPanel>
+
+                    <ComboBox x:Name="LauncherCombo"
+                              Header="Launch with"
+                              PlaceholderText="Choose a launcher"
+                              HorizontalAlignment="Stretch"
+                              AutomationProperties.Name="Launch with">
+                        <ComboBoxItem Content="OpenCode" />
+                        <ComboBoxItem Content="OpenCode v2" />
+                        <ComboBoxItem Content="Codex" />
+                        <ComboBoxItem Content="Claude" />
+                        <ComboBoxItem Content="Custom" />
+                    </ComboBox>
+
+                    <TextBox x:Name="CommandBox"
+                             Header="Command"
+                             PlaceholderText="Enter the command to run"
+                             AutomationProperties.Name="Launcher command" />
+
+                    <Grid ColumnSpacing="10">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox x:Name="WorkingDirectoryBox"
+                                 Grid.Column="0"
+                                 Header="Working directory"
+                                 PlaceholderText="Choose a folder"
+                                 AutomationProperties.Name="Working directory" />
+                        <Button x:Name="BrowseButton"
+                                Grid.Column="1"
+                                Content="Browse"
+                                MinWidth="78"
+                                VerticalAlignment="Bottom"
+                                AutomationProperties.Name="Browse for working directory" />
+                    </Grid>
+
+                    <Button x:Name="ApplyButton"
+                            Content="Apply and restart"
+                            HorizontalAlignment="Left"
+                            Style="{StaticResource AccentButtonStyle}"
+                            AutomationProperties.Name="Apply settings and restart session" />
+
+                    <InfoBar x:Name="StatusInfoBar"
+                             IsOpen="False"
+                             IsClosable="False"
+                             IsIconVisible="False"
+                             Title=""
+                             Message="" />
+                </StackPanel>
+            </Border>
+        </Grid>
+    </Grid>
+</Grid>

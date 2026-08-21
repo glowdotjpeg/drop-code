@@ -3,3 +3,8 @@
 .DS_Store
 .signing.local
 dist/
+Windows/build*/
+Windows/.vs/
+Windows/dist/
+*.dmp
+*.log
