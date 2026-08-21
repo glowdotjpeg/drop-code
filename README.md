@@ -11,8 +11,13 @@ Ghostty.app is not required.
 - Tap `Control+Command` to toggle the panel.
 - Hold `Control+Command` to show it until you release the keys.
 - Launch OpenCode, Codex, Claude, or any custom shell command.
-- Adjust panel height and window opacity from the menu-bar settings.
+- Adjust panel height, centered width, and window opacity from settings.
+- Forward terminal completion requests to macOS desktop notifications.
 - Keep the colors and theme configured by the launched CLI.
+
+For OpenCode completion alerts, enable **Desktop notifications** in DropCode
+and enable **Attention** in OpenCode settings. Other launchers work when they
+emit standard OSC desktop-notification sequences.
 
 ## Download
 
