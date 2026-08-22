@@ -1539,9 +1539,7 @@ void Panel::HandleMouseWheel(short delta, LPARAM lParam) {
 
     POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
     ScreenToClient(hwnd_, &point);
-    RECT client{};
-    GetClientRect(hwnd_, &client);
-    if (!PtInRect(&client, point) || point.y < tabBarHeight_) return;
+    if (point.y < tabBarHeight_) return;
 
     const VTermModifier mods = CurrentModifiers();
     const bool shiftForcesScrollback = (mods & VTERM_MOD_SHIFT) != 0;
