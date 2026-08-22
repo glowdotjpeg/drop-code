@@ -34,7 +34,7 @@ jobs:
           } elseif ($env:RELEASE_BUILD -eq 'true') {
             throw "Release tag must use v<major.minor.patch> or windows-v<major.minor.patch>."
           } else {
-            '0.3.0'
+            '0.3.1'
           }
           .\Windows\scripts\build.ps1 -Architecture x64 -Config Release -Version $version -RunTests
 
@@ -49,7 +49,7 @@ jobs:
           } elseif ($env:RELEASE_BUILD -eq 'true') {
             throw "Release tag must use v<major.minor.patch> or windows-v<major.minor.patch>."
           } else {
-            '0.3.0'
+            '0.3.1'
           }
           .\Windows\scripts\package-release.ps1 -Version $version -Architecture x64
 

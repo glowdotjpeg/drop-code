@@ -13,6 +13,7 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -93,6 +94,8 @@ public:
     void SendMouseButtonAt(int row, int col, int button, bool pressed,
                            VTermModifier mod);
     WheelRoute RouteWheel(int row, int col, int notches, VTermModifier mod);
+    std::optional<WheelRoute> TryRouteWheel(int row, int col, int notches,
+                                            VTermModifier mod);
     void SendFocus(bool focused);
 
     void ResetScroll();
@@ -152,6 +155,8 @@ private:
 
     void Feed(const char* s, size_t len);
     void MarkDamaged() { damaged_ = true; }
+    WheelRoute RouteWheelLocked(int row, int col, int notches,
+                                VTermModifier mod);
 
     HPCON hpc_ = nullptr;
     HANDLE inRead_ = nullptr;

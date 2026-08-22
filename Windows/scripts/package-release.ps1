@@ -3,7 +3,7 @@ param(
     [string]$BuildDir,
 
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = "0.3.0",
+    [string]$Version = "0.3.1",
 
     [ValidateSet("x64", "x86", "arm64")]
     [string]$Architecture = "x64",

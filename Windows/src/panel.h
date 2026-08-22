@@ -72,10 +72,11 @@ private:
     static constexpr UINT kTabExitedMessage = WM_APP + 5;
     static constexpr UINT kChordInputReleasedMessage = WM_APP + 6;
     static constexpr UINT kAnimationFrameMessage = WM_APP + 7;
-
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK TabBarWndProc(HWND hwnd, UINT msg, WPARAM wParam,
                                           LPARAM lParam);
+    static LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM wParam,
+                                              LPARAM lParam);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleTabBarMessage(HWND tabBar, UINT msg, WPARAM wParam,
                                 LPARAM lParam);
@@ -92,6 +93,8 @@ private:
     void PaintTabBar(HDC dc);
     void HandleTabBarClick(int x, int y);
     void InvalidateTabBar();
+    void StartMouseWheelHook();
+    void StopMouseWheelHook();
 
     enum class TabState : uint8_t {
         Starting,
@@ -148,7 +151,8 @@ private:
     void HandleKeyDown(UINT vk);
     void HandleChar(wchar_t ch);
     void SuppressTranslatedChar(wchar_t expected);
-    void HandleMouseWheel(short delta, LPARAM lParam);
+    bool HandleMouseWheel(short delta, POINT screenPoint,
+                          VTermModifier modifiers, bool nonBlocking);
     bool BeginApplicationMousePress(int button, POINT point,
                                     VTermModifier modifiers);
     bool EndApplicationMousePress(int button, POINT point);
@@ -161,7 +165,6 @@ private:
     dc::terminal::SelectionPoint CellPointForTerminal(
         POINT point, const dc::terminal::Terminal& terminal) const;
     dc::terminal::SelectionPoint CellPointFromClient(POINT point) const;
-    dc::terminal::SelectionPoint ConversationWheelPoint() const;
     bool CopySelection();
     bool PasteClipboard();
     void SelectAll();
@@ -170,6 +173,8 @@ private:
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;
     HWND previousForeground_ = nullptr;
+    HHOOK mouseHook_ = nullptr;
+    static Panel* mouseHookOwner_;
     std::shared_ptr<LifetimeToken> lifetime_;
 
     renderer::TermRenderer renderer_;

@@ -841,6 +841,10 @@ static void set_dec_mode(VTermState *state, int num, int val)
     state->mouse_protocol = val ? MOUSE_SGR : MOUSE_X10;
     break;
 
+  case 1007:
+    state->mode.alternate_scroll = val;
+    break;
+
   case 1015:
     state->mouse_protocol = val ? MOUSE_RXVT : MOUSE_X10;
     break;
@@ -923,6 +927,10 @@ static void request_dec_mode(VTermState *state, int num)
 
     case 1006:
       reply = state->mouse_protocol == MOUSE_SGR;
+      break;
+
+    case 1007:
+      reply = state->mode.alternate_scroll;
       break;
 
     case 1015:
@@ -2114,6 +2122,7 @@ void vterm_state_reset(VTermState *state, int hard)
   state->mode.leftrightmargin = 0;
   state->mode.bracketpaste    = 0;
   state->mode.report_focus    = 0;
+  state->mode.alternate_scroll = 1;
 
   state->mouse_flags = 0;
 
@@ -2153,6 +2162,8 @@ void vterm_state_reset(VTermState *state, int hard)
   settermprop_bool(state, VTERM_PROP_CURSORVISIBLE, 1);
   settermprop_bool(state, VTERM_PROP_CURSORBLINK,   1);
   settermprop_int (state, VTERM_PROP_CURSORSHAPE,   VTERM_PROP_CURSORSHAPE_BLOCK);
+  settermprop_bool(state, VTERM_PROP_ALTSCREEN,    0);
+  settermprop_int (state, VTERM_PROP_MOUSE,        VTERM_PROP_MOUSE_NONE);
 
   if(hard) {
     state->pos.row = 0;
@@ -2167,6 +2178,11 @@ void vterm_state_reset(VTermState *state, int hard)
 void vterm_state_get_cursorpos(const VTermState *state, VTermPos *cursorpos)
 {
   *cursorpos = state->pos;
+}
+
+int vterm_state_get_alternate_scroll(const VTermState *state)
+{
+  return state->mode.alternate_scroll;
 }
 
 void vterm_state_set_callbacks(VTermState *state, const VTermStateCallbacks *callbacks, void *user)

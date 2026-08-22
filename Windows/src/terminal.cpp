@@ -499,9 +499,26 @@ Terminal::WheelRoute Terminal::RouteWheel(int row, int col, int notches,
                                           VTermModifier mod) {
     if (notches == 0) return WheelRoute::Ignored;
     std::lock_guard lock(mutex_);
+    return RouteWheelLocked(row, col, notches, mod);
+}
+
+std::optional<Terminal::WheelRoute> Terminal::TryRouteWheel(
+    int row, int col, int notches, VTermModifier mod) {
+    if (notches == 0) return WheelRoute::Ignored;
+    std::unique_lock lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return std::nullopt;
+    return RouteWheelLocked(row, col, notches, mod);
+}
+
+Terminal::WheelRoute Terminal::RouteWheelLocked(int row, int col, int notches,
+                                                VTermModifier mod) {
     if (!vt_) return WheelRoute::Ignored;
 
     if (mouseMode_ != VTERM_PROP_MOUSE_NONE) {
+        if (scrollOffset_ != 0) {
+            scrollOffset_ = 0;
+            damaged_ = true;
+        }
         const int button = notches > 0 ? 4 : 5;
         for (int i = 0; i < std::abs(notches); ++i) {
             vterm_mouse_button_at(vt_, row, col, button, true, mod);
@@ -509,7 +526,20 @@ Terminal::WheelRoute Terminal::RouteWheel(int row, int col, int notches,
         return WheelRoute::Application;
     }
 
-    if (alternateScreen_) return WheelRoute::Ignored;
+    VTermState* state = vterm_obtain_state(vt_);
+    if (alternateScreen_) {
+        if (state && vterm_state_get_alternate_scroll(state)) {
+            constexpr int kAlternateScrollLines = 3;
+            const VTermKey key = notches > 0 ? VTERM_KEY_UP : VTERM_KEY_DOWN;
+            for (int notch = 0; notch < std::abs(notches); ++notch) {
+                for (int line = 0; line < kAlternateScrollLines; ++line) {
+                    vterm_keyboard_key(vt_, key, VTERM_MOD_NONE);
+                }
+            }
+            return WheelRoute::Application;
+        }
+        return WheelRoute::Ignored;
+    }
 
     const int oldOffset = scrollOffset_;
     scrollOffset_ = std::clamp(
@@ -646,6 +676,7 @@ int Terminal::OnSetTermProp(VTermProp prop, VTermValue* value, void* user) {
         self->mouseMode_ = value->number;
     } else if (prop == VTERM_PROP_ALTSCREEN && value) {
         self->alternateScreen_ = value->boolean;
+        self->scrollOffset_ = 0;
     }
     self->MarkDamaged();
     return 1;

@@ -24,7 +24,7 @@ emit standard OSC desktop-notification sequences.
 macOS builds are available from [GitHub Releases](https://github.com/glowdotjpeg/drop-code/releases).
 Unzip the archive and move `DropCode.app` to Applications.
 
-Windows builds are available in the [Windows v0.3.0 release](https://github.com/glowdotjpeg/drop-code/releases/tag/windows-v0.3.0).
+Windows builds are available in the [Windows v0.3.1 release](https://github.com/glowdotjpeg/drop-code/releases/tag/windows-v0.3.1).
 
 ## Windows
 

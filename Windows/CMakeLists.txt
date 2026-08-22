@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-set(DROPCODE_VERSION "0.3.0" CACHE STRING "DropCode semantic version")
+set(DROPCODE_VERSION "0.3.1" CACHE STRING "DropCode semantic version")
 if(NOT DROPCODE_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
   message(FATAL_ERROR "DROPCODE_VERSION must use major.minor.patch format.")
 endif()

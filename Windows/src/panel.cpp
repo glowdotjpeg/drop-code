@@ -37,7 +37,25 @@ std::wstring NormalizeDirectory(const std::wstring& value) {
     return fullPath;
 }
 
+VTermModifier MouseModifiers(bool shift, bool control, bool alt) {
+    VTermModifier modifiers = VTERM_MOD_NONE;
+    if (shift) {
+        modifiers =
+            static_cast<VTermModifier>(modifiers | VTERM_MOD_SHIFT);
+    }
+    if (control) {
+        modifiers =
+            static_cast<VTermModifier>(modifiers | VTERM_MOD_CTRL);
+    }
+    if (alt) {
+        modifiers = static_cast<VTermModifier>(modifiers | VTERM_MOD_ALT);
+    }
+    return modifiers;
 }
+
+}
+
+Panel* Panel::mouseHookOwner_ = nullptr;
 
 Panel::Panel()
     : lifetime_(std::make_shared<LifetimeToken>()) {
@@ -123,6 +141,7 @@ bool Panel::Create(HINSTANCE instance) {
 
 void Panel::Destroy() {
     CancelPointerInteraction();
+    StopMouseWheelHook();
     chordMonitor_.Stop();
     StopAnimationClock();
     animating_ = false;
@@ -169,9 +188,55 @@ LRESULT CALLBACK Panel::TabBarWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     return DefWindowProcW(hwnd, msg, wParam, lParam);
 }
 
+LRESULT CALLBACK Panel::LowLevelMouseProc(int code, WPARAM wParam,
+                                          LPARAM lParam) {
+    Panel* panel = mouseHookOwner_;
+    if (code == HC_ACTION && wParam == WM_MOUSEWHEEL && panel &&
+        panel->hwnd_ && panel->isVisible_) {
+        const auto* event = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
+        if (event) {
+            const HWND hitWindow = WindowFromPoint(event->pt);
+            if (hitWindow != panel->hwnd_ &&
+                !IsChild(panel->hwnd_, hitWindow)) {
+                return CallNextHookEx(panel->mouseHook_, code, wParam, lParam);
+            }
+            const short delta = GET_WHEEL_DELTA_WPARAM(
+                static_cast<WPARAM>(event->mouseData));
+            const VTermModifier modifiers = MouseModifiers(
+                (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0,
+                (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0,
+                (GetAsyncKeyState(VK_MENU) & 0x8000) != 0);
+            if (delta != 0 &&
+                panel->HandleMouseWheel(delta, event->pt, modifiers, true)) {
+                return 1;
+            }
+        }
+    }
+    return CallNextHookEx(panel ? panel->mouseHook_ : nullptr, code, wParam,
+                          lParam);
+}
+
+void Panel::StartMouseWheelHook() {
+    if (mouseHook_ || (mouseHookOwner_ && mouseHookOwner_ != this)) return;
+
+    mouseHookOwner_ = this;
+    mouseHook_ = SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, instance_, 0);
+    if (!mouseHook_) mouseHookOwner_ = nullptr;
+}
+
+void Panel::StopMouseWheelHook() {
+    if (mouseHook_) {
+        UnhookWindowsHookEx(mouseHook_);
+        mouseHook_ = nullptr;
+    }
+    if (mouseHookOwner_ == this) mouseHookOwner_ = nullptr;
+}
+
 LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_NCDESTROY:
+            StopMouseWheelHook();
+            SetWindowLongPtrW(hwnd_, GWLP_USERDATA, 0);
             hwnd_ = nullptr;
             return 0;
 
@@ -296,6 +361,7 @@ LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_SETFOCUS:
+            if (isVisible_) StartMouseWheelHook();
             if (TabSession* tab = ActiveTab();
                 tab && tab->terminal &&
                 tab->state.load() == TabState::Running) {
@@ -315,9 +381,17 @@ LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             return 0;
 
-        case WM_MOUSEWHEEL:
-            HandleMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam), lParam);
+        case WM_MOUSEWHEEL: {
+            const WORD keyState = GET_KEYSTATE_WPARAM(wParam);
+            const VTermModifier modifiers = MouseModifiers(
+                (keyState & MK_SHIFT) != 0, (keyState & MK_CONTROL) != 0,
+                (GetKeyState(VK_MENU) & 0x8000) != 0);
+            HandleMouseWheel(
+                GET_WHEEL_DELTA_WPARAM(wParam),
+                POINT{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)}, modifiers,
+                false);
             return 0;
+        }
 
         case WM_LBUTTONDOWN:
             SetFocus(hwnd_);
@@ -496,6 +570,7 @@ void Panel::SetVisible(bool visible) {
         monitor::FramesFor(monitor, heightPercent_ / 100.0);
 
     if (visible) {
+        StartMouseWheelHook();
         if (!animating_ || !previousForeground_) {
             previousForeground_ = GetForegroundWindow();
         }
@@ -526,6 +601,7 @@ void Panel::SetVisible(bool visible) {
         BeginAnimation(frames.shown.top, true);
         ResizeTerminal();
     } else {
+        StopMouseWheelHook();
         if (TabSession* tab = ActiveTab()) tab->wheelDeltaRemainder = 0;
         RestorePreviousForeground();
         BeginAnimation(frames.hidden.top, false);

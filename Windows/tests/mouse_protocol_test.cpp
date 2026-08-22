@@ -44,10 +44,10 @@ std::string DescribeBytes(const std::string& value) {
     return description.str();
 }
 
-bool ExpectWheelPacket(VTerm* terminal, int button,
+bool ExpectWheelPacket(VTerm* terminal, int button, VTermModifier modifiers,
                        const char* expected, const char* caseName) {
     vterm_mouse_button_at(
-        terminal, 7, 12, button, true, VTERM_MOD_NONE);
+        terminal, 7, 12, button, true, modifiers);
 
     const std::string actual = DrainOutput(terminal);
     if (actual == expected) {
@@ -57,9 +57,7 @@ bool ExpectWheelPacket(VTerm* terminal, int button,
 
     std::cerr << "FAIL: " << caseName << '\n'
               << "  expected exactly: " << DescribeBytes(expected) << '\n'
-              << "  actual:           " << DescribeBytes(actual) << '\n'
-              << "  The complete output must contain one SGR packet and no "
-                 "preceding motion event.\n";
+              << "  actual:           " << DescribeBytes(actual) << '\n';
     return false;
 }
 
@@ -81,7 +79,10 @@ int main() {
 
     vterm_state_reset(state, 1);
 
-    constexpr char setup[] = "\x1b[?1003h\x1b[?1006h";
+    // This is OpenTUI's movement-disabled sequence. The tracking modes are
+    // deliberately ordered for terminals where the last mode wins.
+    constexpr char setup[] =
+        "\x1b[?1003l\x1b[?1000h\x1b[?1002h\x1b[?1006h";
     const std::size_t setupSize = sizeof(setup) - 1;
     const std::size_t consumed =
         vterm_input_write(terminal, setup, setupSize);
@@ -94,11 +95,50 @@ int main() {
 
     DrainOutput(terminal);
 
+    constexpr char queryModes[] =
+        "\x1b[?1000$p\x1b[?1002$p\x1b[?1003$p"
+        "\x1b[?1006$p\x1b[?1007$p";
+    vterm_input_write(terminal, queryModes, sizeof(queryModes) - 1);
+    const std::string modeReply = DrainOutput(terminal);
+
     bool passed = true;
+    constexpr char expectedModeReply[] =
+        "\x1b[?1000;2$y\x1b[?1002;1$y\x1b[?1003;2$y"
+        "\x1b[?1006;1$y\x1b[?1007;1$y";
+    if (modeReply != expectedModeReply) {
+        std::cerr << "FAIL: DEC mode replies\n"
+                  << "  expected exactly: "
+                  << DescribeBytes(expectedModeReply) << '\n'
+                  << "  actual:           " << DescribeBytes(modeReply) << '\n';
+        passed = false;
+    }
     passed &= ExpectWheelPacket(
-        terminal, 4, "\x1b[<64;13;8M", "button 4 at row 7, column 12");
+        terminal, 4, VTERM_MOD_NONE, "\x1b[<64;13;8M",
+        "button 4 at row 7, column 12");
     passed &= ExpectWheelPacket(
-        terminal, 5, "\x1b[<65;13;8M", "button 5 at row 7, column 12");
+        terminal, 5, VTERM_MOD_NONE, "\x1b[<65;13;8M",
+        "button 5 at row 7, column 12");
+    passed &= ExpectWheelPacket(
+        terminal, 4, VTERM_MOD_SHIFT, "\x1b[<68;13;8M",
+        "shift-modified wheel up");
+    passed &= ExpectWheelPacket(
+        terminal, 4, VTERM_MOD_ALT, "\x1b[<72;13;8M",
+        "alt-modified wheel up");
+    passed &= ExpectWheelPacket(
+        terminal, 4, VTERM_MOD_CTRL, "\x1b[<80;13;8M",
+        "control-modified wheel up");
+    const VTermModifier allModifiers = static_cast<VTermModifier>(
+        VTERM_MOD_SHIFT | VTERM_MOD_ALT | VTERM_MOD_CTRL);
+    passed &= ExpectWheelPacket(
+        terminal, 4, allModifiers, "\x1b[<92;13;8M",
+        "fully modified wheel up");
+
+    constexpr char teardown[] =
+        "\x1b[?1003l\x1b[?1002l\x1b[?1000l\x1b[?1006l";
+    vterm_input_write(terminal, teardown, sizeof(teardown) - 1);
+    DrainOutput(terminal);
+    passed &= ExpectWheelPacket(terminal, 4, VTERM_MOD_NONE, "",
+                                "OpenTUI mouse teardown");
 
     vterm_free(terminal);
     return passed ? 0 : 1;

@@ -327,35 +327,53 @@ void Panel::HandleChar(wchar_t ch) {
     terminal.SendUnichar(codepoint, mods);
 }
 
-void Panel::HandleMouseWheel(short delta, LPARAM lParam) {
+bool Panel::HandleMouseWheel(short delta, POINT screenPoint,
+                             VTermModifier modifiers, bool nonBlocking) {
     TabSession* tab = ActiveTab();
-    if (!tab || !tab->terminal || tab->state.load() != TabState::Running) {
+    if (!isVisible_ || !tab || !tab->terminal ||
+        tab->state.load() != TabState::Running) {
         if (tab) tab->wheelDeltaRemainder = 0;
-        return;
+        return false;
     }
 
-    POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    POINT point = screenPoint;
     if (!ScreenToClient(hwnd_, &point) || !IsTerminalClientPoint(point)) {
         tab->wheelDeltaRemainder = 0;
-        return;
+        return false;
     }
 
-    tab->wheelDeltaRemainder += static_cast<int>(delta);
-    const int notches = tab->wheelDeltaRemainder / WHEEL_DELTA;
-    tab->wheelDeltaRemainder %= WHEEL_DELTA;
-    if (notches == 0) return;
+    int remainder = tab->wheelDeltaRemainder;
+    if (remainder != 0 && delta != 0 &&
+        (remainder > 0) != (delta > 0)) {
+        remainder = 0;
+    }
+    remainder += static_cast<int>(delta);
+    const int notches = remainder / WHEEL_DELTA;
+    remainder %= WHEEL_DELTA;
+    if (notches == 0) {
+        tab->wheelDeltaRemainder = remainder;
+        return true;
+    }
 
-    const dc::terminal::SelectionPoint cell = ConversationWheelPoint();
-    const dc::terminal::Terminal::WheelRoute route =
-        tab->terminal->RouteWheel(cell.row, cell.col, notches,
-                                  CurrentModifiers());
-    if (route == dc::terminal::Terminal::WheelRoute::Scrollback &&
+    const dc::terminal::SelectionPoint cell =
+        CellPointForTerminal(point, *tab->terminal);
+    const std::optional<dc::terminal::Terminal::WheelRoute> route =
+        nonBlocking
+            ? tab->terminal->TryRouteWheel(cell.row, cell.col, notches,
+                                           modifiers)
+            : std::optional{tab->terminal->RouteWheel(
+                  cell.row, cell.col, notches, modifiers)};
+    if (!route) return false;
+
+    tab->wheelDeltaRemainder = remainder;
+    if (*route == dc::terminal::Terminal::WheelRoute::Scrollback &&
         tab->selection.active) {
         tab->selection.active = false;
     }
-    if (route == dc::terminal::Terminal::WheelRoute::Scrollback) {
+    if (*route != dc::terminal::Terminal::WheelRoute::Ignored) {
         InvalidateRect(hwnd_, nullptr, FALSE);
     }
+    return true;
 }
 
 bool Panel::BeginApplicationMousePress(int button, POINT point,
@@ -477,18 +495,6 @@ dc::terminal::SelectionPoint Panel::CellPointFromClient(POINT point) const {
     const TabSession* tab = ActiveTab();
     if (!tab || !tab->terminal) return {};
     return CellPointForTerminal(point, *tab->terminal);
-}
-
-dc::terminal::SelectionPoint Panel::ConversationWheelPoint() const {
-    dc::terminal::SelectionPoint result{};
-    const TabSession* tab = ActiveTab();
-    if (!tab || !tab->terminal) return result;
-
-    const int rows = std::max(1, tab->terminal->Rows());
-    const int cols = std::max(1, tab->terminal->Cols());
-    result.row = std::clamp(rows / 4, 0, rows - 1);
-    result.col = std::clamp(cols / 2, 0, cols - 1);
-    return result;
 }
 
 bool Panel::CopySelection() {
