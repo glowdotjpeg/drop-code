@@ -396,8 +396,11 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
         const int rows = terminal.Rows();
         const int cols = terminal.Cols();
         terminalCols = cols;
-        const int offset = terminal.ScrollOffsetLocked();
         const auto& scrollback = terminal.Scrollback();
+        const int scrollbackLines = static_cast<int>(scrollback.size());
+        const int offset = std::clamp(terminal.ScrollOffsetLocked(), 0,
+                                      scrollbackLines);
+        const int firstVirtualRow = scrollbackLines - offset;
 
         auto collectRow = [&](int row, int lineCols,
                               const VTermScreenCell* lineCells,
@@ -454,28 +457,30 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
             }
         };
 
-        const int sbVisible = std::min(
-            {offset, static_cast<int>(scrollback.size()), std::max(0, rows)});
-        const int screenRowsToShow = std::max(0, rows - sbVisible);
         std::vector<ColorRun> runs;
 
-        for (int i = 0; i < sbVisible; ++i) {
-            const auto& line = scrollback[scrollback.size() - sbVisible + i];
-            collectRow(i, static_cast<int>(line.cells.size()),
-                       line.cells.data(), runs);
-            rowsToRender.push_back(RenderRow{i, std::move(runs)});
+        for (int viewportRow = 0; viewportRow < rows; ++viewportRow) {
+            const int virtualRow = firstVirtualRow + viewportRow;
+            if (virtualRow >= 0 && virtualRow < scrollbackLines) {
+                const auto& line = scrollback[virtualRow];
+                collectRow(viewportRow, static_cast<int>(line.cells.size()),
+                           line.cells.data(), runs);
+            } else if (virtualRow >= scrollbackLines &&
+                       virtualRow < scrollbackLines + rows) {
+                collectRow(virtualRow - scrollbackLines, 0, nullptr, runs);
+            } else {
+                runs.clear();
+            }
+            rowsToRender.push_back(
+                RenderRow{viewportRow, std::move(runs)});
             runs.clear();
         }
 
-        for (int row = 0; row < screenRowsToShow; ++row) {
-            collectRow(row, 0, nullptr, runs);
-            rowsToRender.push_back(RenderRow{row + sbVisible, std::move(runs)});
-            runs.clear();
-        }
-
-        cursorRow = terminal.CursorRow() + sbVisible;
+        cursorRow = scrollbackLines + terminal.CursorRow() - firstVirtualRow;
         cursorCol = terminal.CursorCol();
-        cursorVisible = terminal.CursorVisible();
+        cursorVisible = offset == 0 && terminal.CursorVisible() &&
+                        cursorRow >= 0 && cursorRow < rows &&
+                        cursorCol >= 0 && cursorCol < cols;
     }
 
     target_->BeginDraw();

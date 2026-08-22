@@ -83,6 +83,7 @@ public:
     std::wstring CopySelection(const SelectionRange& selection) const;
     void SendMouseMove(int row, int col, VTermModifier mod);
     void SendMouseButton(int button, bool pressed, VTermModifier mod);
+    void SendMouseWheel(int row, int col, int direction, VTermModifier mod);
 
     void Scroll(int deltaLines);
     void ResetScroll();

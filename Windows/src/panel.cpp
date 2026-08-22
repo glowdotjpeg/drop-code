@@ -454,7 +454,7 @@ LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             return 0;
 
         case WM_MOUSEWHEEL:
-            HandleMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam));
+            HandleMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam), lParam);
             return 0;
 
         case WM_LBUTTONDOWN:
@@ -1525,17 +1525,40 @@ void Panel::HandleChar(wchar_t ch) {
     terminal.SendUnichar(codepoint, mods);
 }
 
-void Panel::HandleMouseWheel(short delta) {
-    const int lines = delta / WHEEL_DELTA;
+void Panel::HandleMouseWheel(short delta, LPARAM lParam) {
     TabSession* tab = ActiveTab();
-    if (lines != 0 && tab && tab->terminal &&
-        tab->state.load() == TabState::Running) {
-        if (tab->selection.active) {
-            tab->selection.active = false;
-        }
-        tab->terminal->Scroll(lines);
-        InvalidateRect(hwnd_, nullptr, FALSE);
+    if (!tab || !tab->terminal || tab->state.load() != TabState::Running) {
+        wheelDeltaRemainder_ = 0;
+        return;
     }
+
+    wheelDeltaRemainder_ += static_cast<int>(delta);
+    const int notches = wheelDeltaRemainder_ / WHEEL_DELTA;
+    wheelDeltaRemainder_ %= WHEEL_DELTA;
+    if (notches == 0) return;
+
+    POINT point{GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+    ScreenToClient(hwnd_, &point);
+    RECT client{};
+    GetClientRect(hwnd_, &client);
+    if (!PtInRect(&client, point) || point.y < tabBarHeight_) return;
+
+    const VTermModifier mods = CurrentModifiers();
+    const bool shiftForcesScrollback = (mods & VTERM_MOD_SHIFT) != 0;
+    if (tab->terminal->MouseReportingEnabled() && !shiftForcesScrollback) {
+        const dc::terminal::SelectionPoint cell = CellPointFromClient(point);
+        const int direction = notches > 0 ? 1 : -1;
+        for (int i = 0; i < std::abs(notches); ++i) {
+            tab->terminal->SendMouseWheel(cell.row, cell.col, direction, mods);
+        }
+        return;
+    }
+
+    if (tab->selection.active) {
+        tab->selection.active = false;
+    }
+    tab->terminal->Scroll(notches);
+    InvalidateRect(hwnd_, nullptr, FALSE);
 }
 
 void Panel::BeginSelection(POINT point) {

@@ -340,10 +340,29 @@ std::wstring Terminal::CopySelection(const SelectionRange& selection) const {
     if (!selection.active || !screen_ || rows_ <= 0 || cols_ <= 0) return {};
 
     const int scrollbackLines = static_cast<int>(scrollback_.size());
-    const int visibleScrollback = std::min(
-        {scrollOffset_, scrollbackLines, std::max(0, rows_)});
+    const int offset = std::clamp(scrollOffset_, 0, scrollbackLines);
+    const int firstVirtualRow = scrollbackLines - offset;
     VTermState* state = vterm_obtain_state(vt_);
     std::wstring result;
+
+    auto sourceForRow = [&](int viewportRow,
+                            const std::vector<VTermScreenCell>*& scrollbackRow,
+                            int& screenRow) {
+        scrollbackRow = nullptr;
+        screenRow = -1;
+
+        const int virtualRow = firstVirtualRow + viewportRow;
+        if (virtualRow < 0) return;
+        if (virtualRow < scrollbackLines) {
+            scrollbackRow = &scrollback_[virtualRow].cells;
+            return;
+        }
+
+        const int candidateScreenRow = virtualRow - scrollbackLines;
+        if (candidateScreenRow >= 0 && candidateScreenRow < rows_) {
+            screenRow = candidateScreenRow;
+        }
+    };
 
     for (int row = 0; row < rows_; ++row) {
         int startCol = 0;
@@ -352,17 +371,11 @@ std::wstring Terminal::CopySelection(const SelectionRange& selection) const {
 
         const std::vector<VTermScreenCell>* scrollbackRow = nullptr;
         int screenRow = -1;
-        if (row < visibleScrollback) {
-            const int scrollbackIndex =
-                scrollbackLines - visibleScrollback + row;
-            scrollbackRow = &scrollback_[scrollbackIndex].cells;
-        } else {
-            screenRow = row - visibleScrollback;
-        }
+        sourceForRow(row, scrollbackRow, screenRow);
 
         const int availableColumns = scrollbackRow
                                          ? static_cast<int>(scrollbackRow->size())
-                                         : cols_;
+                                         : screenRow >= 0 ? cols_ : 0;
         const int limit = std::min(endCol, availableColumns);
         std::wstring line;
         for (int col = std::min(startCol, limit); col < limit; ++col) {
@@ -388,18 +401,17 @@ std::wstring Terminal::CopySelection(const SelectionRange& selection) const {
         int nextEnd = 0;
         if (selection.BoundsForRow(row + 1, cols_, nextStart, nextEnd)) {
             bool nextLineContinues = false;
-            if (row + 1 < visibleScrollback) {
-                const int nextScrollbackIndex =
-                    scrollbackLines - visibleScrollback + row + 1;
+            const std::vector<VTermScreenCell>* nextScrollbackRow = nullptr;
+            int nextScreenRow = -1;
+            sourceForRow(row + 1, nextScrollbackRow, nextScreenRow);
+            if (nextScrollbackRow) {
+                const int nextVirtualRow = firstVirtualRow + row + 1;
                 nextLineContinues =
-                    scrollback_[nextScrollbackIndex].continuation;
-            } else if (state) {
-                const int nextScreenRow = row + 1 - visibleScrollback;
-                if (nextScreenRow >= 0 && nextScreenRow < rows_) {
-                    const VTermLineInfo* lineInfo =
-                        vterm_state_get_lineinfo(state, nextScreenRow);
-                    nextLineContinues = lineInfo && lineInfo->continuation;
-                }
+                    scrollback_[nextVirtualRow].continuation;
+            } else if (state && nextScreenRow >= 0) {
+                const VTermLineInfo* lineInfo =
+                    vterm_state_get_lineinfo(state, nextScreenRow);
+                nextLineContinues = lineInfo && lineInfo->continuation;
             }
             if (!nextLineContinues) result += L"\r\n";
         }
@@ -415,6 +427,15 @@ void Terminal::SendMouseMove(int row, int col, VTermModifier mod) {
 void Terminal::SendMouseButton(int button, bool pressed, VTermModifier mod) {
     std::lock_guard lock(mutex_);
     if (vt_) vterm_mouse_button(vt_, button, pressed, mod);
+}
+
+void Terminal::SendMouseWheel(int row, int col, int direction,
+                              VTermModifier mod) {
+    if (direction == 0) return;
+    std::lock_guard lock(mutex_);
+    if (!vt_) return;
+    vterm_mouse_move(vt_, row, col, mod);
+    vterm_mouse_button(vt_, direction > 0 ? 4 : 5, true, mod);
 }
 
 void Terminal::Scroll(int deltaLines) {
@@ -561,12 +582,18 @@ int Terminal::OnScreenResize(int, int, void* user) {
 int Terminal::OnSbPushLine4(int cols, const VTermScreenCell* cells,
                             bool continuation, void* user) {
     Terminal* self = static_cast<Terminal*>(user);
+    const bool wasScrolled = self->scrollOffset_ > 0;
     self->scrollback_.push_back({});
     ScrollbackLine& line = self->scrollback_.back();
     line.continuation = continuation;
     line.cells.assign(cells, cells + cols);
     while (static_cast<int>(self->scrollback_.size()) > kMaxScrollbackLines) {
         self->scrollback_.pop_front();
+    }
+    if (wasScrolled) {
+        self->scrollOffset_ = std::min(
+            self->scrollOffset_ + 1,
+            static_cast<int>(self->scrollback_.size()));
     }
     self->MarkDamaged();
     return 1;
@@ -580,6 +607,8 @@ int Terminal::OnSbPopLine(int cols, VTermScreenCell* cells, void* user) {
     if (copyCount > static_cast<size_t>(cols)) copyCount = static_cast<size_t>(cols);
     std::copy_n(line.cells.begin(), copyCount, cells);
     self->scrollback_.pop_front();
+    self->scrollOffset_ = std::min(
+        self->scrollOffset_, static_cast<int>(self->scrollback_.size()));
     self->MarkDamaged();
     return 1;
 }

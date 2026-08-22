@@ -130,7 +130,7 @@ private:
 
     void HandleKeyDown(UINT vk, bool sysKey);
     void HandleChar(wchar_t ch);
-    void HandleMouseWheel(short delta);
+    void HandleMouseWheel(short delta, LPARAM lParam);
     void BeginSelection(POINT point);
     void UpdateSelection(POINT point);
     dc::terminal::SelectionPoint CellPointFromClient(POINT point) const;
@@ -172,6 +172,7 @@ private:
     bool selecting_ = false;
     bool chordInputSuppressed_ = false;
     bool suppressNextChar_ = false;
+    int wheelDeltaRemainder_ = 0;
     wchar_t pendingHighSurrogate_ = 0;
 };
 
