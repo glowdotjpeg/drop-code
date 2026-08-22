@@ -21,6 +21,7 @@ constexpr UINT kTabStartedMessage = WM_APP + 3;
 constexpr UINT kTabFailedMessage = WM_APP + 4;
 constexpr UINT kTabExitedMessage = WM_APP + 5;
 constexpr UINT kChordInputReleasedMessage = WM_APP + 6;
+constexpr UINT kForwardedMouseWheelMessage = WM_APP + 7;
 constexpr int kTabBarHeight = 36;
 
 float EaseOutCubic(float t) {
@@ -189,6 +190,8 @@ void StopTerminalAsync(const std::shared_ptr<dc::terminal::Terminal>& terminal) 
 
 }
 
+Panel* Panel::mouseHookOwner_ = nullptr;
+
 Panel::Panel()
     : lifetime_(std::make_shared<LifetimeToken>()),
       updateGate_(std::make_shared<UpdateGate>()) {
@@ -272,6 +275,7 @@ bool Panel::Create(HINSTANCE instance) {
 }
 
 void Panel::Destroy() {
+    StopMouseWheelHook();
     if (selecting_) {
         if (GetCapture() == hwnd_) ReleaseCapture();
         selecting_ = false;
@@ -325,6 +329,58 @@ LRESULT CALLBACK Panel::TabBarWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     }
     if (self) return self->HandleTabBarMessage(hwnd, msg, wParam, lParam);
     return DefWindowProcW(hwnd, msg, wParam, lParam);
+}
+
+LRESULT CALLBACK Panel::LowLevelMouseProc(int code, WPARAM wParam,
+                                          LPARAM lParam) {
+    Panel* panel = mouseHookOwner_;
+    if (code == HC_ACTION && wParam == WM_MOUSEWHEEL && panel &&
+        panel->hwnd_ && panel->isVisible_) {
+        const auto* mouse = reinterpret_cast<const MSLLHOOKSTRUCT*>(lParam);
+        RECT window{};
+        if (mouse && GetWindowRect(panel->hwnd_, &window)) {
+            const POINT point = mouse->pt;
+            const bool overTerminal =
+                point.x >= window.left && point.x < window.right &&
+                point.y >= window.top + panel->tabBarHeight_ &&
+                point.y < window.bottom;
+            if (overTerminal) {
+                const short delta = GET_WHEEL_DELTA_WPARAM(
+                    static_cast<WPARAM>(mouse->mouseData));
+                if (delta != 0 &&
+                    PostMessageW(
+                        panel->hwnd_, kForwardedMouseWheelMessage,
+                        static_cast<WPARAM>(static_cast<USHORT>(delta)),
+                        MAKELPARAM(point.x, point.y))) {
+                    return 1;
+                }
+            }
+        }
+    }
+    return CallNextHookEx(panel ? panel->mouseHook_ : nullptr, code, wParam,
+                          lParam);
+}
+
+bool Panel::StartMouseWheelHook() {
+    if (mouseHook_) return true;
+    if (mouseHookOwner_ && mouseHookOwner_ != this) return false;
+
+    mouseHookOwner_ = this;
+    mouseHook_ =
+        SetWindowsHookExW(WH_MOUSE_LL, LowLevelMouseProc, instance_, 0);
+    if (!mouseHook_) {
+        mouseHookOwner_ = nullptr;
+        return false;
+    }
+    return true;
+}
+
+void Panel::StopMouseWheelHook() {
+    if (mouseHook_) {
+        UnhookWindowsHookEx(mouseHook_);
+        mouseHook_ = nullptr;
+    }
+    if (mouseHookOwner_ == this) mouseHookOwner_ = nullptr;
 }
 
 LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -387,6 +443,9 @@ LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             const bool succeeded = msg == kTabStartedMessage;
             if (succeeded && tab->state.load() == TabState::Failed) return 0;
             tab->state.store(succeeded ? TabState::Running : TabState::Failed);
+            if (succeeded && tab == ActiveTab() && GetFocus() == hwnd_) {
+                tab->terminal->SendFocus(true);
+            }
             if (!succeeded && tab == ActiveTab()) MessageBeep(MB_ICONERROR);
             InvalidateTabBar();
             InvalidateRect(hwnd_, nullptr, FALSE);
@@ -453,8 +512,28 @@ LRESULT Panel::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
             PasteClipboard();
             return 0;
 
+        case WM_SETFOCUS:
+            if (TabSession* tab = ActiveTab();
+                tab && tab->terminal &&
+                tab->state.load() == TabState::Running) {
+                tab->terminal->SendFocus(true);
+            }
+            return 0;
+
+        case WM_KILLFOCUS:
+            if (TabSession* tab = ActiveTab();
+                tab && tab->terminal &&
+                tab->state.load() == TabState::Running) {
+                tab->terminal->SendFocus(false);
+            }
+            return 0;
+
         case WM_MOUSEWHEEL:
             HandleMouseWheel(GET_WHEEL_DELTA_WPARAM(wParam), lParam);
+            return 0;
+
+        case kForwardedMouseWheelMessage:
+            HandleMouseWheel(static_cast<short>(LOWORD(wParam)), lParam);
             return 0;
 
         case WM_LBUTTONDOWN:
@@ -622,6 +701,7 @@ void Panel::SetVisible(bool visible) {
         monitor::FramesFor(monitor, heightPercent_ / 100.0);
 
     if (visible) {
+        StartMouseWheelHook();
         if (!animating_ || !previousForeground_) {
             previousForeground_ = GetForegroundWindow();
         }
@@ -650,6 +730,8 @@ void Panel::SetVisible(bool visible) {
         BeginAnimation(frames.shown.top, true);
         ResizeTerminal();
     } else {
+        StopMouseWheelHook();
+        wheelDeltaRemainder_ = 0;
         BeginAnimation(frames.hidden.top, false);
     }
 }
@@ -863,6 +945,15 @@ const Panel::TabSession* Panel::ActiveTab() const {
 void Panel::NewTab() {
     if (!hwnd_) return;
 
+    const bool panelFocused = GetFocus() == hwnd_;
+    if (panelFocused) {
+        if (TabSession* current = ActiveTab();
+            current && current->terminal &&
+            current->state.load() == TabState::Running) {
+            current->terminal->SendFocus(false);
+        }
+    }
+
     auto tab = std::make_shared<TabSession>();
     tab->id = nextTabId_++;
     tab->workingDirectory = workingDirectory_;
@@ -889,7 +980,12 @@ void Panel::CloseActiveTab() {
         return;
     }
 
+    const bool panelFocused = GetFocus() == hwnd_;
     const auto tab = tabs_[activeTab_];
+    if (panelFocused && tab->terminal &&
+        tab->state.load() == TabState::Running) {
+        tab->terminal->SendFocus(false);
+    }
     StopTabAsync(tab);
     tabs_.erase(tabs_.begin() + static_cast<std::ptrdiff_t>(activeTab_));
     if (activeTab_ >= tabs_.size()) activeTab_ = tabs_.size() - 1;
@@ -897,14 +993,37 @@ void Panel::CloseActiveTab() {
     InvalidateRect(hwnd_, nullptr, FALSE);
     InvalidateTabBar();
     SetFocus(hwnd_);
+    if (panelFocused) {
+        if (TabSession* current = ActiveTab();
+            current && current->terminal &&
+            current->state.load() == TabState::Running) {
+            current->terminal->SendFocus(true);
+        }
+    }
 }
 
 void Panel::SelectTab(int index) {
     if (index < 0 || index >= static_cast<int>(tabs_.size())) return;
+    const bool panelFocused = GetFocus() == hwnd_;
+    const bool changed = index != static_cast<int>(activeTab_);
+    if (panelFocused && changed) {
+        if (TabSession* current = ActiveTab();
+            current && current->terminal &&
+            current->state.load() == TabState::Running) {
+            current->terminal->SendFocus(false);
+        }
+    }
     activeTab_ = static_cast<size_t>(index);
     InvalidateRect(hwnd_, nullptr, FALSE);
     InvalidateTabBar();
     SetFocus(hwnd_);
+    if (panelFocused && changed) {
+        if (TabSession* current = ActiveTab();
+            current && current->terminal &&
+            current->state.load() == TabState::Running) {
+            current->terminal->SendFocus(true);
+        }
+    }
 }
 
 void Panel::SelectRelativeTab(int direction) {
@@ -919,6 +1038,10 @@ void Panel::SelectRelativeTab(int direction) {
 void Panel::RestartActiveTab() {
     TabSession* tab = ActiveTab();
     if (!tab || !tab->terminal) return;
+
+    if (GetFocus() == hwnd_ && tab->state.load() == TabState::Running) {
+        tab->terminal->SendFocus(false);
+    }
 
     std::shared_ptr<dc::terminal::Terminal> oldTerminal;
     TabState oldState = TabState::Stopping;

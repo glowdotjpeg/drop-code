@@ -438,6 +438,18 @@ void Terminal::SendMouseWheel(int row, int col, int direction,
     vterm_mouse_button(vt_, direction > 0 ? 4 : 5, true, mod);
 }
 
+void Terminal::SendFocus(bool focused) {
+    std::lock_guard lock(mutex_);
+    if (!vt_) return;
+    VTermState* state = vterm_obtain_state(vt_);
+    if (!state) return;
+    if (focused) {
+        vterm_state_focus_in(state);
+    } else {
+        vterm_state_focus_out(state);
+    }
+}
+
 void Terminal::Scroll(int deltaLines) {
     std::lock_guard lock(mutex_);
     int maxOffset = static_cast<int>(scrollback_.size());

@@ -84,6 +84,7 @@ public:
     void SendMouseMove(int row, int col, VTermModifier mod);
     void SendMouseButton(int button, bool pressed, VTermModifier mod);
     void SendMouseWheel(int row, int col, int direction, VTermModifier mod);
+    void SendFocus(bool focused);
 
     void Scroll(int deltaLines);
     void ResetScroll();

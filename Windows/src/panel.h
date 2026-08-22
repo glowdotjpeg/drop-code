@@ -72,6 +72,8 @@ private:
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK TabBarWndProc(HWND hwnd, UINT msg, WPARAM wParam,
                                           LPARAM lParam);
+    static LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM wParam,
+                                              LPARAM lParam);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleTabBarMessage(HWND tabBar, UINT msg, WPARAM wParam,
                                 LPARAM lParam);
@@ -87,6 +89,8 @@ private:
     void PaintTabBar(HDC dc);
     void HandleTabBarClick(int x, int y);
     void InvalidateTabBar();
+    bool StartMouseWheelHook();
+    void StopMouseWheelHook();
 
     enum class TabState : uint8_t {
         Starting,
@@ -142,6 +146,8 @@ private:
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;
     HWND previousForeground_ = nullptr;
+    HHOOK mouseHook_ = nullptr;
+    static Panel* mouseHookOwner_;
     std::shared_ptr<LifetimeToken> lifetime_;
     std::shared_ptr<UpdateGate> updateGate_;
 
