@@ -4,9 +4,7 @@
 #include <dwrite.h>
 
 #include <cstdint>
-#include <map>
 #include <string>
-#include <vector>
 
 #include "terminal.h"
 
@@ -14,11 +12,6 @@ namespace dc::renderer {
 
 constexpr uint8_t kDefaultBg[3] = {0x0A, 0x0A, 0x0A};
 constexpr uint8_t kDefaultFg[3] = {0xD6, 0xD6, 0xD6};
-
-struct CellSize {
-    float width = 8.0f;
-    float height = 16.0f;
-};
 
 class TermRenderer {
 public:
@@ -36,25 +29,24 @@ public:
     bool Render(dc::terminal::Terminal& terminal, int topOffset = 0,
                 const dc::terminal::SelectionRange* selection = nullptr);
 
-    CellSize CellMetrics() const { return {cellWidth_, cellHeight_}; }
-
     int RowsForHeight(int height) const;
     int ColsForWidth(int width) const;
+    dc::terminal::SelectionPoint CellAtPoint(POINT point, int topOffset,
+                                             int rows, int cols) const;
 
 private:
-    struct BrushKey {
-        uint8_t r, g, b;
-        bool operator<(const BrushKey& other) const {
-            return (r << 16 | g << 8 | b) < (other.r << 16 | other.g << 8 | other.b);
-        }
-    };
-
-    ID2D1SolidColorBrush* Brush(uint8_t r, uint8_t g, uint8_t b);
-    void DrawCellText(int row, int col, int runWidth, float topOffset,
+    ID2D1SolidColorBrush* SetBrushColor(uint8_t r, uint8_t g, uint8_t b);
+    void DrawCellText(int left, int top, int right, int bottom,
+                      int viewportRight, int viewportBottom,
                       const std::wstring& text,
                       bool bold, bool italic, uint8_t underline, bool strike,
-                      const D2D1_COLOR_F& fg);
-    void DrawCursor(int row, int col, float topOffset);
+                      uint8_t r, uint8_t g, uint8_t b);
+    void DrawCellDecorations(int left, int top, int right, int bottom,
+                             uint8_t underline, bool strike,
+                             ID2D1SolidColorBrush* brush);
+    bool DrawBlockElement(uint32_t codepoint, int left, int top, int right,
+                          int bottom, ID2D1SolidColorBrush* brush);
+    void DrawCursor(int left, int top, int right, int bottom);
 
     ID2D1Factory* factory_ = nullptr;
     IDWriteFactory* writeFactory_ = nullptr;
@@ -63,7 +55,7 @@ private:
     IDWriteTextFormat* bold_ = nullptr;
     IDWriteTextFormat* italic_ = nullptr;
     IDWriteTextFormat* boldItalic_ = nullptr;
-    std::map<BrushKey, ID2D1SolidColorBrush*> brushes_;
+    ID2D1SolidColorBrush* solidBrush_ = nullptr;
 
     float cellWidth_ = 8.0f;
     float cellHeight_ = 16.0f;

@@ -7,7 +7,7 @@ namespace dc::hotkey {
 
 constexpr UINT kChordHotkeyId = 1;
 constexpr int kHoldDelayMs = 200;
-constexpr int kPollIntervalMs = 8;
+constexpr int kPollIntervalMs = 16;
 
 class ChordMonitor {
 public:

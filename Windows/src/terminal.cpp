@@ -1,5 +1,7 @@
 #include "terminal.h"
 
+#include <cstdlib>
+
 #include "launcher.h"
 
 namespace dc::terminal {
@@ -7,6 +9,22 @@ namespace {
 
 constexpr int kPipeBufferSize = 64 * 1024;
 constexpr int kReadBufferSize = 16 * 1024;
+
+std::wstring SystemCommandProcessorPath() {
+    std::vector<wchar_t> buffer(MAX_PATH);
+    for (;;) {
+        const UINT length = GetSystemDirectoryW(
+            buffer.data(), static_cast<UINT>(buffer.size()));
+        if (length == 0) return {};
+        if (length < buffer.size()) {
+            std::wstring path(buffer.data(), length);
+            if (!path.empty() && path.back() != L'\\') path += L'\\';
+            path += L"cmd.exe";
+            return path;
+        }
+        buffer.resize(static_cast<size_t>(length) + 1);
+    }
+}
 
 std::string Utf8(const std::wstring& wide) {
     if (wide.empty()) return {};
@@ -54,7 +72,8 @@ bool Terminal::Start(const std::wstring& launchCommand,
                      const std::wstring& workingDirectory,
                      int cols, int rows,
                      uint64_t sessionId) {
-    Stop();
+    std::lock_guard lifecycleLock(lifecycleMutex_);
+    StopImpl();
 
     {
         std::lock_guard lock(mutex_);
@@ -67,14 +86,14 @@ bool Terminal::Start(const std::wstring& launchCommand,
 
     if (!CreatePipe(&inRead_, &inWrite_, nullptr, kPipeBufferSize) ||
         !CreatePipe(&outRead_, &outWrite_, nullptr, kPipeBufferSize)) {
-        Stop();
+        StopImpl();
         return false;
     }
     if (!SetHandleInformation(inRead_, HANDLE_FLAG_INHERIT, 0) ||
         !SetHandleInformation(inWrite_, HANDLE_FLAG_INHERIT, 0) ||
         !SetHandleInformation(outRead_, HANDLE_FLAG_INHERIT, 0) ||
         !SetHandleInformation(outWrite_, HANDLE_FLAG_INHERIT, 0)) {
-        Stop();
+        StopImpl();
         return false;
     }
 
@@ -82,7 +101,7 @@ bool Terminal::Start(const std::wstring& launchCommand,
     HPCON hpc = nullptr;
     HRESULT hr = CreatePseudoConsole(size, inRead_, outWrite_, 0, &hpc);
     if (FAILED(hr)) {
-        Stop();
+        StopImpl();
         return false;
     }
     {
@@ -100,7 +119,7 @@ bool Terminal::Start(const std::wstring& launchCommand,
         reinterpret_cast<PPROC_THREAD_ATTRIBUTE_LIST>(attributeBuffer.data());
     if (!InitializeProcThreadAttributeList(startupInfo.lpAttributeList, 1, 0,
                                            &attributeSize)) {
-        Stop();
+        StopImpl();
         return false;
     }
 
@@ -112,10 +131,22 @@ bool Terminal::Start(const std::wstring& launchCommand,
         launcher::ScriptPath(launchCommand, sessionId);
     if (scriptPath.empty()) {
         DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
-        Stop();
+        StopImpl();
         return false;
     }
-    std::wstring commandLine = L"cmd.exe /d /k call \"" + scriptPath + L"\"";
+    {
+        std::lock_guard lock(mutex_);
+        scriptPath_ = scriptPath;
+    }
+
+    const std::wstring commandProcessor = SystemCommandProcessorPath();
+    if (commandProcessor.empty()) {
+        DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
+        StopImpl();
+        return false;
+    }
+    std::wstring commandLine = L"\"" + commandProcessor +
+                               L"\" /d /k call \"" + scriptPath + L"\"";
 
     HANDLE childJob = CreateJobObjectW(nullptr, nullptr);
     JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo{};
@@ -125,7 +156,7 @@ bool Terminal::Start(const std::wstring& launchCommand,
                          sizeof(jobInfo))) {
         if (childJob) CloseHandle(childJob);
         DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
-        Stop();
+        StopImpl();
         return false;
     }
 
@@ -133,16 +164,17 @@ bool Terminal::Start(const std::wstring& launchCommand,
     if (ok) {
         wchar_t* mutableCommandLine = commandLine.data();
         ok = CreateProcessW(
-            nullptr, mutableCommandLine, nullptr, nullptr, FALSE,
-            EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, nullptr,
-            workingDirectory.c_str(), &startupInfo.StartupInfo, &processInfo);
+            commandProcessor.c_str(), mutableCommandLine, nullptr, nullptr,
+            FALSE, EXTENDED_STARTUPINFO_PRESENT | CREATE_SUSPENDED, nullptr,
+            workingDirectory.c_str(), &startupInfo.StartupInfo,
+            &processInfo);
     }
     DeleteProcThreadAttributeList(startupInfo.lpAttributeList);
     startupInfo.lpAttributeList = nullptr;
 
     if (!ok) {
         CloseHandle(childJob);
-        Stop();
+        StopImpl();
         return false;
     }
 
@@ -153,7 +185,7 @@ bool Terminal::Start(const std::wstring& launchCommand,
         CloseHandle(processInfo.hThread);
         CloseHandle(processInfo.hProcess);
         CloseHandle(childJob);
-        Stop();
+        StopImpl();
         return false;
     }
 
@@ -176,16 +208,19 @@ bool Terminal::Start(const std::wstring& launchCommand,
             vterm_output_set_callback(vt_, OutputCallback, this);
             screen_ = vterm_obtain_screen(vt_);
 
-            static VTermScreenCallbacks callbacks = {};
-            callbacks.damage = OnDamage;
-            callbacks.moverect = OnMoveRect;
-            callbacks.movecursor = OnMoveCursor;
-            callbacks.settermprop = OnSetTermProp;
-            callbacks.bell = OnBell;
-            callbacks.resize = OnScreenResize;
-            callbacks.sb_pushline4 = OnSbPushLine4;
-            callbacks.sb_popline = OnSbPopLine;
-            callbacks.sb_clear = OnSbClear;
+            static const VTermScreenCallbacks callbacks = [] {
+                VTermScreenCallbacks value{};
+                value.damage = OnDamage;
+                value.moverect = OnMoveRect;
+                value.movecursor = OnMoveCursor;
+                value.settermprop = OnSetTermProp;
+                value.bell = OnBell;
+                value.resize = OnScreenResize;
+                value.sb_pushline4 = OnSbPushLine4;
+                value.sb_popline = OnSbPopLine;
+                value.sb_clear = OnSbClear;
+                return value;
+            }();
             vterm_screen_set_callbacks(screen_, &callbacks, this);
             vterm_screen_callbacks_has_pushline4(screen_);
             vterm_screen_enable_altscreen(screen_, 1);
@@ -195,29 +230,46 @@ bool Terminal::Start(const std::wstring& launchCommand,
         }
     }
     if (!vt_) {
-        Stop();
+        StopImpl();
         return false;
     }
 
-    writerThread_ = CreateThread(nullptr, 0, WriterThreadProc, this, 0, nullptr);
-    if (!writerThread_) {
-        Stop();
+    const HANDLE writerThread =
+        CreateThread(nullptr, 0, WriterThreadProc, this, 0, nullptr);
+    if (!writerThread) {
+        StopImpl();
         return false;
     }
-    readerThread_ = CreateThread(nullptr, 0, ReaderThreadProc, this, 0, nullptr);
-    if (!readerThread_) {
-        Stop();
+    {
+        std::lock_guard lock(mutex_);
+        writerThread_ = writerThread;
+    }
+
+    const HANDLE readerThread =
+        CreateThread(nullptr, 0, ReaderThreadProc, this, 0, nullptr);
+    if (!readerThread) {
+        StopImpl();
         return false;
+    }
+    {
+        std::lock_guard lock(mutex_);
+        readerThread_ = readerThread;
     }
     return true;
 }
 
 void Terminal::Stop() {
+    std::lock_guard lifecycleLock(lifecycleMutex_);
+    StopImpl();
+}
+
+void Terminal::StopImpl() {
     HPCON hpc = nullptr;
     HANDLE readerThread = nullptr;
     HANDLE writerThread = nullptr;
     HANDLE childProcess = nullptr;
     HANDLE childJob = nullptr;
+    std::wstring scriptPath;
     {
         std::lock_guard lock(mutex_);
         hpc = hpc_;
@@ -232,6 +284,7 @@ void Terminal::Stop() {
         childProcess_ = nullptr;
         childJob = childJob_;
         childJob_ = nullptr;
+        scriptPath = scriptPath_;
     }
     inputCondition_.notify_all();
     if (childJob) {
@@ -243,6 +296,14 @@ void Terminal::Stop() {
     }
     if (hpc) {
         ClosePseudoConsole(hpc);
+    }
+
+    if (childProcess) {
+        DWORD wait = WaitForSingleObject(childProcess, 5000);
+        if (wait != WAIT_OBJECT_0) {
+            TerminateProcess(childProcess, 0);
+            WaitForSingleObject(childProcess, INFINITE);
+        }
     }
 
     for (HANDLE thread : {readerThread, writerThread}) {
@@ -279,19 +340,23 @@ void Terminal::Stop() {
             screen_ = nullptr;
         }
         mouseMode_ = VTERM_PROP_MOUSE_NONE;
+        alternateScreen_ = false;
         scrollback_.clear();
         scrollOffset_ = 0;
         cursorRow_ = 0;
         cursorCol_ = 0;
         cursorVisible_ = true;
         damaged_ = false;
+        scriptPath_.clear();
     }
     if (childJob) CloseHandle(childJob);
     if (childProcess) CloseHandle(childProcess);
+    if (!scriptPath.empty()) DeleteFileW(scriptPath.c_str());
 }
 
 void Terminal::Resize(int cols, int rows) {
     if (cols <= 0 || rows <= 0) return;
+    std::lock_guard lifecycleLock(lifecycleMutex_);
     {
         std::lock_guard lock(mutex_);
         if (cols == cols_ && rows == rows_) return;
@@ -424,18 +489,34 @@ void Terminal::SendMouseMove(int row, int col, VTermModifier mod) {
     if (vt_) vterm_mouse_move(vt_, row, col, mod);
 }
 
-void Terminal::SendMouseButton(int button, bool pressed, VTermModifier mod) {
+void Terminal::SendMouseButtonAt(int row, int col, int button, bool pressed,
+                                 VTermModifier mod) {
     std::lock_guard lock(mutex_);
-    if (vt_) vterm_mouse_button(vt_, button, pressed, mod);
+    if (vt_) vterm_mouse_button_at(vt_, row, col, button, pressed, mod);
 }
 
-void Terminal::SendMouseWheel(int row, int col, int direction,
-                              VTermModifier mod) {
-    if (direction == 0) return;
+Terminal::WheelRoute Terminal::RouteWheel(int row, int col, int notches,
+                                          VTermModifier mod) {
+    if (notches == 0) return WheelRoute::Ignored;
     std::lock_guard lock(mutex_);
-    if (!vt_) return;
-    vterm_mouse_move(vt_, row, col, mod);
-    vterm_mouse_button(vt_, direction > 0 ? 4 : 5, true, mod);
+    if (!vt_) return WheelRoute::Ignored;
+
+    if (mouseMode_ != VTERM_PROP_MOUSE_NONE) {
+        const int button = notches > 0 ? 4 : 5;
+        for (int i = 0; i < std::abs(notches); ++i) {
+            vterm_mouse_button_at(vt_, row, col, button, true, mod);
+        }
+        return WheelRoute::Application;
+    }
+
+    if (alternateScreen_) return WheelRoute::Ignored;
+
+    const int oldOffset = scrollOffset_;
+    scrollOffset_ = std::clamp(
+        scrollOffset_ + notches, 0, static_cast<int>(scrollback_.size()));
+    if (scrollOffset_ == oldOffset) return WheelRoute::Ignored;
+    damaged_ = true;
+    return WheelRoute::Scrollback;
 }
 
 void Terminal::SendFocus(bool focused) {
@@ -450,15 +531,6 @@ void Terminal::SendFocus(bool focused) {
     }
 }
 
-void Terminal::Scroll(int deltaLines) {
-    std::lock_guard lock(mutex_);
-    int maxOffset = static_cast<int>(scrollback_.size());
-    scrollOffset_ = scrollOffset_ + deltaLines;
-    if (scrollOffset_ < 0) scrollOffset_ = 0;
-    if (scrollOffset_ > maxOffset) scrollOffset_ = maxOffset;
-    damaged_ = true;
-}
-
 void Terminal::ResetScroll() {
     std::lock_guard lock(mutex_);
     if (scrollOffset_ != 0) {
@@ -467,10 +539,6 @@ void Terminal::ResetScroll() {
     }
 }
 
-int Terminal::ScrollbackSize() const {
-    std::lock_guard lock(mutex_);
-    return static_cast<int>(scrollback_.size());
-}
 void Terminal::OutputCallback(const char* s, size_t len, void* user) {
     static_cast<Terminal*>(user)->HandleOutput(s, len);
 }
@@ -576,6 +644,8 @@ int Terminal::OnSetTermProp(VTermProp prop, VTermValue* value, void* user) {
     Terminal* self = static_cast<Terminal*>(user);
     if (prop == VTERM_PROP_MOUSE && value) {
         self->mouseMode_ = value->number;
+    } else if (prop == VTERM_PROP_ALTSCREEN && value) {
+        self->alternateScreen_ = value->boolean;
     }
     self->MarkDamaged();
     return 1;
@@ -614,11 +684,17 @@ int Terminal::OnSbPushLine4(int cols, const VTermScreenCell* cells,
 int Terminal::OnSbPopLine(int cols, VTermScreenCell* cells, void* user) {
     Terminal* self = static_cast<Terminal*>(user);
     if (self->scrollback_.empty()) return 0;
-    const ScrollbackLine& line = self->scrollback_.front();
+    for (int col = 0; col < cols; ++col) {
+        cells[col] = {};
+        cells[col].width = 1;
+        cells[col].fg.type = VTERM_COLOR_DEFAULT_FG;
+        cells[col].bg.type = VTERM_COLOR_DEFAULT_BG;
+    }
+    const ScrollbackLine& line = self->scrollback_.back();
     size_t copyCount = line.cells.size();
     if (copyCount > static_cast<size_t>(cols)) copyCount = static_cast<size_t>(cols);
     std::copy_n(line.cells.begin(), copyCount, cells);
-    self->scrollback_.pop_front();
+    self->scrollback_.pop_back();
     self->scrollOffset_ = std::min(
         self->scrollOffset_, static_cast<int>(self->scrollback_.size()));
     self->MarkDamaged();

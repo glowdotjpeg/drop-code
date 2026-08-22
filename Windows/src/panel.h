@@ -9,9 +9,11 @@
 
 #include <atomic>
 #include <cstdint>
+#include <future>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "hotkey.h"
@@ -29,10 +31,7 @@ struct UpdateGate {
     std::atomic<bool> updateScheduled{false};
 };
 
-constexpr UINT kAnimationTimerId = 1;
-constexpr UINT kTerminalFrameTimerId = 3;
 constexpr UINT kAnimationDurationMs = 140;
-constexpr UINT kAnimationTimerIntervalMs = 8;
 constexpr UINT kMinHeightPercent = 20;
 constexpr UINT kMaxHeightPercent = 100;
 
@@ -46,11 +45,8 @@ public:
 
     bool Create(HINSTANCE instance);
     void Destroy();
-    HWND Hwnd() const { return hwnd_; }
 
     void ToggleLatched();
-    bool BeginMomentary();
-    void EndMomentary(bool openedByGesture);
     void RestartTerminal();
     void SetHeightPercentage(int percent);
     void SetOpacityPercentage(int percent);
@@ -61,7 +57,6 @@ public:
     int OpacityPercentage() const { return opacityPercent_; }
     const std::wstring& LaunchCommand() const { return launchCommand_; }
     const std::wstring& WorkingDirectory() const { return workingDirectory_; }
-    bool IsVisible() const { return isVisible_; }
 
     void OnTapToggle() override;
     bool OnHoldStart() override;
@@ -69,11 +64,18 @@ public:
     void OnCancel() override;
 
 private:
+    static constexpr wchar_t kWindowClass[] = L"DropCodePanelWindow";
+    static constexpr wchar_t kTabBarClass[] = L"DropCodeTabBarWindow";
+    static constexpr UINT kTerminalUpdateMessage = WM_APP + 1;
+    static constexpr UINT kTabStartedMessage = WM_APP + 3;
+    static constexpr UINT kTabFailedMessage = WM_APP + 4;
+    static constexpr UINT kTabExitedMessage = WM_APP + 5;
+    static constexpr UINT kChordInputReleasedMessage = WM_APP + 6;
+    static constexpr UINT kAnimationFrameMessage = WM_APP + 7;
+
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK TabBarWndProc(HWND hwnd, UINT msg, WPARAM wParam,
                                           LPARAM lParam);
-    static LRESULT CALLBACK LowLevelMouseProc(int code, WPARAM wParam,
-                                              LPARAM lParam);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleTabBarMessage(HWND tabBar, UINT msg, WPARAM wParam,
                                 LPARAM lParam);
@@ -81,7 +83,8 @@ private:
     void SetVisible(bool visible);
     void BeginAnimation(int toY, bool entering);
     void AnimationTick();
-    void ReleaseAnimationTimerResolution();
+    void StartAnimationClock();
+    void StopAnimationClock();
     void ApplyOpacity();
     void ResizeTerminal();
     void ResizeTabBar();
@@ -89,8 +92,6 @@ private:
     void PaintTabBar(HDC dc);
     void HandleTabBarClick(int x, int y);
     void InvalidateTabBar();
-    bool StartMouseWheelHook();
-    void StopMouseWheelHook();
 
     enum class TabState : uint8_t {
         Starting,
@@ -100,7 +101,7 @@ private:
     };
 
     struct StartToken {
-        std::atomic<bool> cancelled{false};
+        bool cancelled = false;
     };
 
     struct TabSession {
@@ -108,16 +109,28 @@ private:
         std::wstring workingDirectory;
         std::shared_ptr<dc::terminal::Terminal> terminal;
         std::shared_ptr<StartToken> startToken;
+        std::shared_ptr<UpdateGate> updateGate;
         std::mutex lifecycleMutex;
         dc::terminal::SelectionRange selection;
+        int wheelDeltaRemainder = 0;
         std::atomic<TabState> state{TabState::Starting};
         std::atomic<uint64_t> generation{0};
+    };
+
+    struct ApplicationMousePress {
+        int button = 0;
+        dc::terminal::SelectionPoint cell;
+        std::shared_ptr<dc::terminal::Terminal> terminal;
     };
 
     bool CreateTabBar();
     void StartTabAsync(const std::shared_ptr<TabSession>& tab,
                        int cols, int rows);
     void StopTabAsync(const std::shared_ptr<TabSession>& tab);
+    void StopTerminalAsync(
+        const std::shared_ptr<dc::terminal::Terminal>& terminal);
+    void TrackWorker(std::future<void> worker);
+    void ReapWorkers(bool wait);
     void NewTab();
     void CloseActiveTab();
     void SelectTab(int index);
@@ -132,12 +145,23 @@ private:
     std::wstring TabLabel(int index) const;
     TabSession* FindTab(uint64_t tabId);
 
-    void HandleKeyDown(UINT vk, bool sysKey);
+    void HandleKeyDown(UINT vk);
     void HandleChar(wchar_t ch);
+    void SuppressTranslatedChar(wchar_t expected);
     void HandleMouseWheel(short delta, LPARAM lParam);
+    bool BeginApplicationMousePress(int button, POINT point,
+                                    VTermModifier modifiers);
+    bool EndApplicationMousePress(int button, POINT point);
+    void UpdateApplicationMousePress(POINT point);
+    void CancelApplicationMousePress();
+    void CancelPointerInteraction();
     void BeginSelection(POINT point);
     void UpdateSelection(POINT point);
+    bool IsTerminalClientPoint(POINT point) const;
+    dc::terminal::SelectionPoint CellPointForTerminal(
+        POINT point, const dc::terminal::Terminal& terminal) const;
     dc::terminal::SelectionPoint CellPointFromClient(POINT point) const;
+    dc::terminal::SelectionPoint ConversationWheelPoint() const;
     bool CopySelection();
     bool PasteClipboard();
     void SelectAll();
@@ -146,15 +170,13 @@ private:
     HWND hwnd_ = nullptr;
     HINSTANCE instance_ = nullptr;
     HWND previousForeground_ = nullptr;
-    HHOOK mouseHook_ = nullptr;
-    static Panel* mouseHookOwner_;
     std::shared_ptr<LifetimeToken> lifetime_;
-    std::shared_ptr<UpdateGate> updateGate_;
 
     renderer::TermRenderer renderer_;
     hotkey::ChordMonitor chordMonitor_;
     HWND tabBar_ = nullptr;
     std::vector<std::shared_ptr<TabSession>> tabs_;
+    std::vector<std::future<void>> workers_;
     size_t activeTab_ = 0;
     uint64_t nextTabId_ = 1;
 
@@ -172,13 +194,15 @@ private:
     int animEndY_ = 0;
     int animLeft_ = 0;
     LONGLONG animStartCounter_ = 0;
-    bool terminalFramePending_ = false;
-    bool animationTimerResolutionActive_ = false;
+    std::jthread animationClock_;
+    std::atomic<bool> animationFramePending_{false};
 
     bool selecting_ = false;
+    ApplicationMousePress applicationMousePress_;
     bool chordInputSuppressed_ = false;
-    bool suppressNextChar_ = false;
-    int wheelDeltaRemainder_ = 0;
+    bool translatedCharPending_ = false;
+    wchar_t expectedTranslatedChar_ = 0;
+    LONG translatedCharMessageTime_ = 0;
     wchar_t pendingHighSurrogate_ = 0;
 };
 

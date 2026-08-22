@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
-  <assemblyIdentity version="0.2.0.0" processorArchitecture="*" name="DropCode" type="win32"/>
+  <assemblyIdentity version="@DROPCODE_VERSION_FOUR@" processorArchitecture="*" name="DropCode" type="win32"/>
   <description>DropCode - drop-down AI coding terminal</description>
   <dependency>
     <dependentAssembly>

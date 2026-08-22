@@ -1,14 +1,14 @@
 #include <Windows.h>
-#include "resource.h"
+#include "@CMAKE_CURRENT_SOURCE_DIR@/src/resource.h"
 
-IDI_APP_ICON ICON "app.ico"
-IDI_TRAY_ICON ICON "app.ico"
-IDR_APP_MANIFEST RT_MANIFEST "app.manifest"
-IDR_SETTINGS_XAML RCDATA "settings.xaml"
+IDI_APP_ICON ICON "@CMAKE_CURRENT_SOURCE_DIR@/src/app.ico"
+IDI_TRAY_ICON ICON "@CMAKE_CURRENT_SOURCE_DIR@/src/app.ico"
+IDR_APP_MANIFEST RT_MANIFEST "@CMAKE_CURRENT_BINARY_DIR@/generated/app.manifest"
+IDR_SETTINGS_XAML RCDATA "@CMAKE_CURRENT_SOURCE_DIR@/src/settings.xaml"
 
 VS_VERSION_INFO VERSIONINFO
- FILEVERSION 0,2,0,0
- PRODUCTVERSION 0,2,0,0
+ FILEVERSION @DROPCODE_VERSION_COMMAS@
+ PRODUCTVERSION @DROPCODE_VERSION_COMMAS@
  FILEFLAGSMASK 0x3fL
 #ifdef _DEBUG
  FILEFLAGS 0x1L
@@ -25,11 +25,11 @@ BEGIN
         BEGIN
             VALUE "CompanyName", "DropCode"
             VALUE "FileDescription", "DropCode"
-             VALUE "FileVersion", "0.2.0.0"
+            VALUE "FileVersion", "@DROPCODE_VERSION_FOUR@"
             VALUE "InternalName", "DropCode"
             VALUE "OriginalFilename", "DropCode.exe"
             VALUE "ProductName", "DropCode"
-             VALUE "ProductVersion", "0.2.0.0"
+            VALUE "ProductVersion", "@DROPCODE_VERSION_FOUR@"
         END
     END
     BLOCK "VarFileInfo"

@@ -18,6 +18,8 @@
 
 namespace dc::terminal {
 
+struct TerminalRouteTestAccessor;
+
 constexpr int kMaxScrollbackLines = 2000;
 
 struct ScrollbackLine {
@@ -62,6 +64,12 @@ public:
     using InvalidateCallback = std::function<void()>;
     using ExitCallback = std::function<void()>;
 
+    enum class WheelRoute : uint8_t {
+        Ignored,
+        Application,
+        Scrollback,
+    };
+
     Terminal();
     ~Terminal();
 
@@ -82,23 +90,29 @@ public:
     bool MouseReportingEnabled() const;
     std::wstring CopySelection(const SelectionRange& selection) const;
     void SendMouseMove(int row, int col, VTermModifier mod);
-    void SendMouseButton(int button, bool pressed, VTermModifier mod);
-    void SendMouseWheel(int row, int col, int direction, VTermModifier mod);
+    void SendMouseButtonAt(int row, int col, int button, bool pressed,
+                           VTermModifier mod);
+    WheelRoute RouteWheel(int row, int col, int notches, VTermModifier mod);
     void SendFocus(bool focused);
 
-    void Scroll(int deltaLines);
     void ResetScroll();
     int ScrollOffset() const {
         std::lock_guard lock(mutex_);
         return scrollOffset_;
     }
     int ScrollOffsetLocked() const { return scrollOffset_; }
-    int ScrollbackSize() const;
-
-    int Rows() const { return rows_; }
-    int Cols() const { return cols_; }
+    int Rows() const {
+        std::lock_guard lock(mutex_);
+        return rows_;
+    }
+    int Cols() const {
+        std::lock_guard lock(mutex_);
+        return cols_;
+    }
 
     std::mutex& Lock() { return mutex_; }
+    int RowsLocked() const { return rows_; }
+    int ColsLocked() const { return cols_; }
     VTermScreen* Screen() { return screen_; }
     const std::deque<ScrollbackLine>& Scrollback() const { return scrollback_; }
 
@@ -114,6 +128,10 @@ public:
     bool CursorVisible() const { return cursorVisible_; }
 
 private:
+    friend struct TerminalRouteTestAccessor;
+
+    void StopImpl();
+
     static void OutputCallback(const char* s, size_t len, void* user);
     void HandleOutput(const char* s, size_t len);
 
@@ -148,12 +166,15 @@ private:
     VTerm* vt_ = nullptr;
     VTermScreen* screen_ = nullptr;
 
+    std::mutex lifecycleMutex_;
     mutable std::mutex mutex_;
+    std::wstring scriptPath_;
     std::deque<ScrollbackLine> scrollback_;
     int scrollOffset_ = 0;
     int rows_ = 24;
     int cols_ = 80;
     int mouseMode_ = VTERM_PROP_MOUSE_NONE;
+    bool alternateScreen_ = false;
     int cursorRow_ = 0;
     int cursorCol_ = 0;
     bool cursorVisible_ = true;

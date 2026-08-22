@@ -20,18 +20,38 @@ jobs:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.release_tag || github.ref }}
 
       - name: Build
         shell: pwsh
-        run: .\Windows\scripts\build.ps1 -Architecture x64 -Config Release
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' }}
+        run: |
+          $version = if ($env:RELEASE_TAG -match '^(?:windows-)?v(\d+\.\d+\.\d+)$') {
+            $Matches[1]
+          } elseif ($env:RELEASE_BUILD -eq 'true') {
+            throw "Release tag must use v<major.minor.patch> or windows-v<major.minor.patch>."
+          } else {
+            '0.3.0'
+          }
+          .\Windows\scripts\build.ps1 -Architecture x64 -Config Release -Version $version -RunTests
 
       - name: Package
         shell: pwsh
         env:
           RELEASE_TAG: ${{ inputs.release_tag || github.ref_name }}
+          RELEASE_BUILD: ${{ startsWith(github.ref, 'refs/tags/') || inputs.release_tag != '' }}
         run: |
-          $version = if ($env:RELEASE_TAG -match '^(?:windows-)?v(.+)$') { $Matches[1] } else { '0.2.0' }
-          .\Windows\scripts\package-release.ps1 -Version $version
+          $version = if ($env:RELEASE_TAG -match '^(?:windows-)?v(\d+\.\d+\.\d+)$') {
+            $Matches[1]
+          } elseif ($env:RELEASE_BUILD -eq 'true') {
+            throw "Release tag must use v<major.minor.patch> or windows-v<major.minor.patch>."
+          } else {
+            '0.3.0'
+          }
+          .\Windows\scripts\package-release.ps1 -Version $version -Architecture x64
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

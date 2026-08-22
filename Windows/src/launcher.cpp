@@ -3,6 +3,7 @@
 #include <Windows.h>
 #include <shlobj.h>
 
+#include <atomic>
 #include <limits>
 
 namespace dc::launcher {
@@ -49,29 +50,52 @@ std::wstring EscapeBatch(const std::wstring& command) {
     return escaped;
 }
 
-bool WriteScript(const std::wstring& path, const std::wstring& script) {
-    const std::string utf8 = Utf8(script);
-    if (utf8.empty() ||
-        utf8.size() > (std::numeric_limits<DWORD>::max() - 3ULL)) {
+bool WriteBytes(HANDLE file, const void* data, DWORD size, DWORD& error) {
+    DWORD written = 0;
+    if (!WriteFile(file, data, size, &written, nullptr)) {
+        error = GetLastError();
+        return false;
+    }
+    if (written != size) {
+        error = ERROR_WRITE_FAULT;
+        return false;
+    }
+    return true;
+}
+
+bool WriteScript(const std::wstring& path, const std::string& utf8,
+                 DWORD& error) {
+    error = ERROR_SUCCESS;
+    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
+                              CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        error = GetLastError();
         return false;
     }
 
-    HANDLE file = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr,
-                              CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
-
-    constexpr unsigned char kUtf8Bom[] = {0xEF, 0xBB, 0xBF};
-    DWORD written = 0;
     const DWORD scriptBytes = static_cast<DWORD>(utf8.size());
-    const bool wroteBom = WriteFile(file, kUtf8Bom, sizeof(kUtf8Bom), &written,
-                                    nullptr) &&
-                          written == sizeof(kUtf8Bom);
-    const bool wroteScript = wroteBom &&
-                             WriteFile(file, utf8.data(), scriptBytes, &written,
-                                       nullptr) &&
-                             written == scriptBytes;
-    CloseHandle(file);
-    return wroteScript;
+    bool success = WriteBytes(file, utf8.data(), scriptBytes, error);
+    if (!CloseHandle(file) && success) {
+        error = GetLastError();
+        success = false;
+    }
+    if (!success) DeleteFileW(path.c_str());
+    return success;
+}
+
+unsigned long long ProcessNonce() {
+    static const unsigned long long nonce = [] {
+        LARGE_INTEGER counter{};
+        QueryPerformanceCounter(&counter);
+        return GetTickCount64() ^
+               static_cast<unsigned long long>(counter.QuadPart);
+    }();
+    return nonce;
+}
+
+unsigned long long NextScriptSequence() {
+    static std::atomic<unsigned long long> sequence{0};
+    return sequence.fetch_add(1, std::memory_order_relaxed);
 }
 
 }
@@ -82,6 +106,22 @@ bool IsValidCommand(const std::wstring& command) {
         if (ch < L' ' || ch == 0x7f) return false;
     }
     return true;
+}
+
+void CleanupStaleScripts() {
+    const std::wstring directory = Directory();
+    const std::wstring pattern = directory + L"\\launch-*.cmd";
+    WIN32_FIND_DATAW data{};
+    const HANDLE search = FindFirstFileW(pattern.c_str(), &data);
+    if (search == INVALID_HANDLE_VALUE) return;
+
+    do {
+        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0) {
+            const std::wstring path = directory + L"\\" + data.cFileName;
+            DeleteFileW(path.c_str());
+        }
+    } while (FindNextFileW(search, &data));
+    FindClose(search);
 }
 
 std::wstring Directory() {
@@ -124,9 +164,29 @@ std::wstring ScriptPath(const std::wstring& launchCommand,
         L"echo DropCode command exited (%exit_code%).\r\n"
         L"endlocal & exit /b %exit_code%\r\n";
 
-    const std::wstring scriptPath = dir + L"\\launch-" +
-                                     std::to_wstring(sessionId) + L".cmd";
-    return WriteScript(scriptPath, script) ? scriptPath : std::wstring{};
+    const std::string utf8 = Utf8(script);
+    if (utf8.empty() ||
+        utf8.size() > std::numeric_limits<DWORD>::max()) {
+        return {};
+    }
+
+    constexpr int kCreateAttempts = 32;
+    const DWORD processId = GetCurrentProcessId();
+    const unsigned long long processNonce = ProcessNonce();
+    for (int attempt = 0; attempt < kCreateAttempts; ++attempt) {
+        const std::wstring scriptPath =
+            dir + L"\\launch-" + std::to_wstring(sessionId) + L"-" +
+            std::to_wstring(processId) + L"-" +
+            std::to_wstring(processNonce) + L"-" +
+            std::to_wstring(NextScriptSequence()) + L".cmd";
+
+        DWORD error = ERROR_SUCCESS;
+        if (WriteScript(scriptPath, utf8, error)) return scriptPath;
+        if (error != ERROR_FILE_EXISTS && error != ERROR_ALREADY_EXISTS) {
+            return {};
+        }
+    }
+    return {};
 }
 
 }

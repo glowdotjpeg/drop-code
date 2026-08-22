@@ -9,43 +9,39 @@
 #include "winui_runtime.h"
 
 namespace {
-int GuardedRun(HINSTANCE instance) {
-    if (dc::app::AppController::ActivateExisting()) {
-        return 0;
+int RunMessageLoop(HINSTANCE instance, bool settingsAvailable) {
+    dc::app::AppController app;
+    if (!app.Create(instance, settingsAvailable)) return 1;
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        if (settingsAvailable && ContentPreTranslateMessage(&msg)) continue;
+        if (app.HandleDialogMessage(&msg)) continue;
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
     }
+
+    return static_cast<int>(msg.wParam);
+}
+
+int GuardedRun(HINSTANCE instance) {
+    if (dc::app::AppController::ActivateExisting()) return 0;
 
     const HRESULT bootstrapResult = dc::winui::InitializeWindowsAppSdk();
-    if (FAILED(bootstrapResult)) {
-        MessageBoxW(nullptr,
-                    L"DropCode requires the matching Windows App Runtime "
-                    L"2.3.1 runtime. Install it, then start DropCode again.",
-                    L"DropCode", MB_OK | MB_ICONERROR);
-        return 1;
-    }
-    int result = 0;
+    if (FAILED(bootstrapResult)) return RunMessageLoop(instance, false);
+
+    int result = 1;
+    bool coreStarted = false;
     try {
-        result = dc::winui::RunXamlApplication([&]() -> int {
-            dc::app::AppController app;
-            if (!app.Create(instance)) {
-                return 1;
-            }
-
-            MSG msg{};
-            while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
-                if (ContentPreTranslateMessage(&msg)) continue;
-                if (app.HandleDialogMessage(&msg)) continue;
-                TranslateMessage(&msg);
-                DispatchMessageW(&msg);
-            }
-
-            app.Shutdown();
-            return static_cast<int>(msg.wParam);
-        });
+        result = dc::winui::RunXamlApplication(
+            [&] {
+                coreStarted = true;
+                return RunMessageLoop(instance, true);
+            });
     } catch (...) {
         dc::winui::ShutdownWindowsAppSdk();
-        return 1;
+        return coreStarted ? 1 : RunMessageLoop(instance, false);
     }
-
     dc::winui::ShutdownWindowsAppSdk();
     return result;
 }

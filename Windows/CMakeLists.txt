@@ -1,6 +1,18 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(DropCode LANGUAGES C CXX)
+set(DROPCODE_VERSION "0.3.0" CACHE STRING "DropCode semantic version")
+if(NOT DROPCODE_VERSION MATCHES "^([0-9]+)\\.([0-9]+)\\.([0-9]+)$")
+  message(FATAL_ERROR "DROPCODE_VERSION must use major.minor.patch format.")
+endif()
+set(DROPCODE_VERSION_MAJOR "${CMAKE_MATCH_1}")
+set(DROPCODE_VERSION_MINOR "${CMAKE_MATCH_2}")
+set(DROPCODE_VERSION_PATCH "${CMAKE_MATCH_3}")
+set(DROPCODE_VERSION_FOUR
+    "${DROPCODE_VERSION_MAJOR}.${DROPCODE_VERSION_MINOR}.${DROPCODE_VERSION_PATCH}.0")
+set(DROPCODE_VERSION_COMMAS
+    "${DROPCODE_VERSION_MAJOR},${DROPCODE_VERSION_MINOR},${DROPCODE_VERSION_PATCH},0")
+
+project(DropCode VERSION "${DROPCODE_VERSION}" LANGUAGES C CXX)
 
 if(NOT WIN32)
   message(FATAL_ERROR "DropCode's WinUI 3 settings surface requires Windows.")
@@ -13,6 +25,8 @@ set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 
 if(MSVC)
+  set(CMAKE_MSVC_RUNTIME_LIBRARY
+      "MultiThreaded$<$<CONFIG:Debug>:Debug>")
   add_compile_options(/W4 /permissive- /Zc:__cplusplus)
 endif()
 
@@ -151,6 +165,59 @@ target_include_directories(libvterm PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/third_party/libvterm/include
 )
 
+include(CTest)
+if(BUILD_TESTING)
+  add_executable(DropCodeMouseProtocolTest
+    tests/mouse_protocol_test.cpp
+  )
+  target_link_libraries(DropCodeMouseProtocolTest PRIVATE libvterm)
+  add_test(NAME mouse-protocol COMMAND DropCodeMouseProtocolTest)
+
+  add_executable(DropCodeTerminalRouteTest
+    tests/terminal_route_test.cpp
+    src/terminal.cpp
+    src/launcher.cpp
+  )
+  target_include_directories(DropCodeTerminalRouteTest PRIVATE src)
+  target_compile_definitions(DropCodeTerminalRouteTest PRIVATE
+    UNICODE
+    _UNICODE
+    WINVER=0x0A00
+    _WIN32_WINNT=0x0A00
+    NOMINMAX
+  )
+  target_link_libraries(DropCodeTerminalRouteTest PRIVATE
+    libvterm
+    shell32
+    ole32
+  )
+  add_test(NAME terminal-route COMMAND DropCodeTerminalRouteTest)
+
+  add_executable(DropCodeLauncherTest
+    tests/launcher_test.cpp
+    src/launcher.cpp
+  )
+  target_include_directories(DropCodeLauncherTest PRIVATE src)
+  target_compile_definitions(DropCodeLauncherTest PRIVATE
+    UNICODE
+    _UNICODE
+    WINVER=0x0A00
+    _WIN32_WINNT=0x0A00
+    NOMINMAX
+  )
+  target_link_libraries(DropCodeLauncherTest PRIVATE
+    shell32
+    ole32
+  )
+  add_test(NAME launcher COMMAND DropCodeLauncherTest)
+endif()
+
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+configure_file(src/app.manifest.in
+               "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest" @ONLY)
+configure_file(src/resources.rc.in
+               "${CMAKE_CURRENT_BINARY_DIR}/generated/resources.rc" @ONLY)
+
 add_executable(DropCode WIN32
   src/main.cpp
   src/app.cpp
@@ -158,17 +225,23 @@ add_executable(DropCode WIN32
   src/launcher.cpp
   src/monitor.cpp
   src/panel.cpp
+  src/panel_animation.cpp
+  src/panel_input.cpp
+  src/panel_sessions.cpp
+  src/panel_tabbar.cpp
   src/registry.cpp
   src/settings.cpp
   src/winui_runtime.cpp
   src/terminal.cpp
   src/tray.cpp
   src/vtrenderer.cpp
-  src/resources.rc
+  "${CMAKE_CURRENT_BINARY_DIR}/generated/resources.rc"
 )
 
-set_property(SOURCE src/resources.rc APPEND PROPERTY OBJECT_DEPENDS
-             "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.xaml")
+set_property(SOURCE "${CMAKE_CURRENT_BINARY_DIR}/generated/resources.rc"
+             APPEND PROPERTY OBJECT_DEPENDS
+             "${CMAKE_CURRENT_SOURCE_DIR}/src/settings.xaml"
+             "${CMAKE_CURRENT_BINARY_DIR}/generated/app.manifest")
 
 target_include_directories(DropCode PRIVATE
   src
@@ -191,7 +264,6 @@ target_link_libraries(DropCode PRIVATE
   libvterm
   d2d1
   dwrite
-  winmm
   dxgi
   user32
   gdi32

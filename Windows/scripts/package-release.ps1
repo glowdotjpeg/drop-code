@@ -1,7 +1,13 @@
 [CmdletBinding()]
 param(
     [string]$BuildDir,
-    [string]$Version = "0.2.0",
+
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$Version = "0.3.0",
+
+    [ValidateSet("x64", "x86", "arm64")]
+    [string]$Architecture = "x64",
+
     [string]$OutputDir
 )
 
@@ -21,7 +27,13 @@ if (-not (Test-Path -LiteralPath $Bootstrap)) {
     throw "Microsoft.WindowsAppRuntime.Bootstrap.dll was not found at $Bootstrap"
 }
 
-$Name = "DropCode-v$Version-windows-x64"
+$ExpectedProductVersion = "$Version.0"
+$ActualProductVersion = (Get-Item -LiteralPath $Exe).VersionInfo.ProductVersion
+if ($ActualProductVersion -ne $ExpectedProductVersion) {
+    throw "DropCode.exe product version is $ActualProductVersion; expected $ExpectedProductVersion. Rebuild with -Version $Version before packaging."
+}
+
+$Name = "DropCode-v$Version-windows-$Architecture"
 $Staging = Join-Path $OutputDir $Name
 $Archive = Join-Path $OutputDir "$Name.zip"
 New-Item -ItemType Directory -Force -Path $OutputDir | Out-Null

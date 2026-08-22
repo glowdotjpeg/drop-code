@@ -24,7 +24,7 @@ emit standard OSC desktop-notification sequences.
 macOS builds are available from [GitHub Releases](https://github.com/glowdotjpeg/drop-code/releases).
 Unzip the archive and move `DropCode.app` to Applications.
 
-Windows builds are available in the [Windows v0.2.0 release](https://github.com/glowdotjpeg/drop-code/releases/tag/windows-v0.2.0).
+Windows builds are available in the [Windows v0.3.0 release](https://github.com/glowdotjpeg/drop-code/releases/tag/windows-v0.3.0).
 
 ## Windows
 
@@ -32,7 +32,8 @@ The Windows implementation is native C++ in [`Windows`](Windows), using Win32,
 ConPTY, Direct2D, DirectWrite, and `libvterm`; WinUI 3 is limited to the
 settings window.
 
-Windows releases require the matching [Windows App Runtime](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
+The Win32 terminal core launches without Windows App Runtime. The native WinUI
+3 Settings window requires the matching [Windows App Runtime](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
 2.3.1 x64 runtime. Build from a Visual Studio developer environment:
 
 ```powershell

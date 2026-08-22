@@ -29,8 +29,9 @@ AppController::~AppController() {
     Shutdown();
 }
 
-bool AppController::Create(HINSTANCE instance) {
+bool AppController::Create(HINSTANCE instance, bool settingsAvailable) {
     instance_ = instance;
+    settingsAvailable_ = settingsAvailable;
 
     instanceMutex_ = CreateMutexW(nullptr, FALSE, kInstanceMutexName);
     if (!instanceMutex_) return false;
@@ -144,6 +145,10 @@ LRESULT AppController::HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam) {
                     panel_.RestartTerminal();
                     return 0;
                 case tray::kMenuSettings: {
+                    if (!settingsAvailable_) {
+                        MessageBeep(MB_ICONWARNING);
+                        return 0;
+                    }
                     settings::PanelApi api;
                     api.getHeight = [this] { return panel_.HeightPercentage(); };
                     api.getOpacity = [this] { return panel_.OpacityPercentage(); };

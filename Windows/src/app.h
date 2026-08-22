@@ -16,14 +16,13 @@ public:
     AppController& operator=(const AppController&) = delete;
 
     static bool ActivateExisting();
-    bool Create(HINSTANCE instance);
-    void Shutdown();
-    HWND HiddenWindow() const { return hiddenWindow_; }
+    bool Create(HINSTANCE instance, bool settingsAvailable);
     bool HandleDialogMessage(MSG* message) {
-        return settings_.HandleDialogMessage(message);
+        return settingsAvailable_ && settings_.HandleDialogMessage(message);
     }
 
 private:
+    void Shutdown();
     static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
     LRESULT HandleMessage(UINT msg, WPARAM wParam, LPARAM lParam);
 
@@ -35,6 +34,7 @@ private:
     settings::SettingsWindow settings_;
     UINT toggleMessage_ = 0;
     bool created_ = false;
+    bool settingsAvailable_ = true;
 };
 
 }

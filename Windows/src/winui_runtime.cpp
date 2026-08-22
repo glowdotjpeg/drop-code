@@ -98,8 +98,7 @@ void ShutdownWindowsAppSdk() {
 int RunXamlApplication(std::function<int()> launchCallback) {
     if (g_xamlRuntime || !launchCallback) return 1;
 
-    auto state = std::make_unique<XamlRuntimeState>();
-    g_xamlRuntime = std::move(state);
+    g_xamlRuntime = std::make_unique<XamlRuntimeState>();
     g_launchResult = 0;
     g_launchCallback = std::move(launchCallback);
 

@@ -41,11 +41,12 @@ developer environment:
 
 The first configure restores Windows App SDK 2.3.1 and C++/WinRT into the
 build directory, generates the C++/WinRT projection, and copies the bootstrap
-DLL beside `DropCode.exe`. This is an unpackaged desktop build, so the Windows
-App Runtime 2.3.1 x64 runtime must also be installed on the machine.
+DLL beside `DropCode.exe`. The Win32 terminal still launches when the Windows
+App Runtime is unavailable; the native WinUI 3 Settings window requires the
+Windows App Runtime 2.3.1 x64 runtime.
 
 The package script creates `Windows/dist/DropCode-v<version>-windows-x64.zip`
 and a SHA-256 checksum file.
 
 Download the matching runtime from the [Windows App SDK downloads](https://learn.microsoft.com/en-us/windows/apps/windows-app-sdk/downloads)
-page before launching an unpackaged build.
+page to use Settings in an unpackaged build.

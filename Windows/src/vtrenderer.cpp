@@ -5,21 +5,36 @@
 #include <algorithm>
 #include <cmath>
 #include <utility>
+#include <vector>
 
 namespace dc::renderer {
 namespace {
 
-struct ColorRun {
+struct RgbColor {
+    uint8_t r = 0;
+    uint8_t g = 0;
+    uint8_t b = 0;
+
+    bool operator==(const RgbColor&) const = default;
+};
+
+struct BackgroundRun {
     int startCol = 0;
     int endCol = 0;
+    RgbColor color;
+};
+
+struct CellGlyph {
+    int col = 0;
+    int width = 1;
     std::wstring text;
+    uint32_t primaryCodepoint = 0;
+    int codepointCount = 0;
     bool bold = false;
     bool italic = false;
     uint8_t underline = VTERM_UNDERLINE_OFF;
     bool strike = false;
-    bool hasBackground = false;
-    uint8_t r = 0, g = 0, b = 0;
-    uint8_t br = 0, bg = 0, bb = 0;
+    RgbColor foreground;
 };
 
 struct ResolvedCell {
@@ -27,34 +42,22 @@ struct ResolvedCell {
     bool italic = false;
     uint8_t underline = VTERM_UNDERLINE_OFF;
     bool strike = false;
-    bool hasBackground = false;
-    uint8_t r = 0, g = 0, b = 0;
-    uint8_t br = 0, bg = 0, bb = 0;
+    RgbColor foreground;
+    RgbColor background;
 };
 
-bool SameRun(const ResolvedCell& cell, const ColorRun& run) {
-    if (cell.bold != run.bold || cell.italic != run.italic ||
-        cell.underline != run.underline || cell.strike != run.strike ||
-        cell.hasBackground != run.hasBackground) {
-        return false;
-    }
-    return cell.r == run.r && cell.g == run.g && cell.b == run.b &&
-           cell.br == run.br && cell.bg == run.bg && cell.bb == run.bb;
+RgbColor ThemeColor(const uint8_t color[3]) {
+    return {color[0], color[1], color[2]};
 }
 
-void ResolveColor(VTermScreen* screen, const VTermColor& color,
-                  uint8_t out[3], bool isDefault, const uint8_t theme[3]) {
+RgbColor ResolveColor(VTermScreen* screen, const VTermColor& color,
+                      bool isDefault, const uint8_t theme[3]) {
     if (isDefault) {
-        out[0] = theme[0];
-        out[1] = theme[1];
-        out[2] = theme[2];
-        return;
+        return ThemeColor(theme);
     }
     VTermColor copy = color;
     vterm_screen_convert_color_to_rgb(screen, &copy);
-    out[0] = copy.rgb.red;
-    out[1] = copy.rgb.green;
-    out[2] = copy.rgb.blue;
+    return {copy.rgb.red, copy.rgb.green, copy.rgb.blue};
 }
 
 ResolvedCell ResolveCell(VTermScreen* screen, const VTermScreenCell& cell) {
@@ -62,37 +65,31 @@ ResolvedCell ResolveCell(VTermScreen* screen, const VTermScreenCell& cell) {
     const bool bgDefault = VTERM_COLOR_IS_DEFAULT_BG(&cell.bg) != 0;
 
     ResolvedCell resolved;
-    uint8_t fg[3] = {};
-    uint8_t bg[3] = {};
-    ResolveColor(screen, cell.fg, fg, fgDefault, kDefaultFg);
-    ResolveColor(screen, cell.bg, bg, bgDefault, kDefaultBg);
+    RgbColor foreground = ResolveColor(screen, cell.fg, fgDefault, kDefaultFg);
+    RgbColor background = ResolveColor(screen, cell.bg, bgDefault, kDefaultBg);
 
     if (cell.attrs.reverse != 0) {
-        std::swap(fg[0], bg[0]);
-        std::swap(fg[1], bg[1]);
-        std::swap(fg[2], bg[2]);
-        resolved.hasBackground = true;
-    } else {
-        resolved.hasBackground = !bgDefault;
+        std::swap(foreground, background);
     }
 
     if (cell.attrs.conceal != 0) {
-        fg[0] = bg[0];
-        fg[1] = bg[1];
-        fg[2] = bg[2];
+        foreground = background;
     }
 
     resolved.bold = cell.attrs.bold != 0;
     resolved.italic = cell.attrs.italic != 0;
     resolved.underline = static_cast<uint8_t>(cell.attrs.underline);
     resolved.strike = cell.attrs.strike != 0;
-    resolved.r = fg[0];
-    resolved.g = fg[1];
-    resolved.b = fg[2];
-    resolved.br = bg[0];
-    resolved.bg = bg[1];
-    resolved.bb = bg[2];
+    resolved.foreground = foreground;
+    resolved.background = background;
     return resolved;
+}
+
+ResolvedCell DefaultCell() {
+    ResolvedCell cell;
+    cell.foreground = ThemeColor(kDefaultFg);
+    cell.background = ThemeColor(kDefaultBg);
+    return cell;
 }
 
 void AppendCodePoint(std::wstring& text, uint32_t codepoint) {
@@ -107,13 +104,39 @@ void AppendCodePoint(std::wstring& text, uint32_t codepoint) {
     text.push_back(static_cast<wchar_t>(0xDC00 + (codepoint & 0x3FF)));
 }
 
-D2D1_RECT_F PixelAlignedRect(float left, float top, float right,
-                             float bottom) {
-    // Cell advances are fractional for Cascadia Mono at most DPI values.
-    // Outward rounding makes neighboring cell fills share/overlap their
-    // rasterized edge instead of exposing a one-pixel strip of the base fill.
-    return D2D1::RectF(std::floor(left), std::floor(top), std::ceil(right),
-                       std::ceil(bottom));
+std::vector<int> CellEdges(int origin, int count, float advance, int limit) {
+    std::vector<int> edges(static_cast<size_t>(count) + 1);
+    edges[0] = std::clamp(origin, 0, limit);
+    for (int index = 1; index <= count; ++index) {
+        const int edge = origin + static_cast<int>(std::lround(
+                                      static_cast<double>(index) * advance));
+        edges[static_cast<size_t>(index)] = std::clamp(edge, edges[0], limit);
+    }
+    return edges;
+}
+
+int FractionEdge(int start, int end, int numerator, int denominator) {
+    const int extent = std::max(0, end - start);
+    return start + (extent * numerator + denominator / 2) / denominator;
+}
+
+bool IsOrdinaryBatchableGlyph(const CellGlyph& glyph) {
+    if (glyph.width != 1 || glyph.codepointCount != 1 ||
+        glyph.text.size() != 1) {
+        return false;
+    }
+
+    const uint32_t codepoint = glyph.primaryCodepoint;
+    return codepoint >= 0x20 && codepoint != 0x7F &&
+           (codepoint < 0x80 || codepoint > 0x9F) &&
+           (codepoint < 0x2580 || codepoint > 0x259F) &&
+           (codepoint < 0xD800 || codepoint > 0xDFFF);
+}
+
+bool HasMatchingTextStyle(const CellGlyph& left, const CellGlyph& right) {
+    return left.bold == right.bold && left.italic == right.italic &&
+           left.underline == right.underline && left.strike == right.strike &&
+           left.foreground == right.foreground;
 }
 
 }
@@ -123,7 +146,9 @@ TermRenderer::~TermRenderer() {
 }
 
 bool TermRenderer::Initialize(HWND hwnd) {
-    if (initialized_ || factory_ || writeFactory_ || target_) Shutdown();
+    if (initialized_ || factory_ || writeFactory_ || target_ || solidBrush_) {
+        Shutdown();
+    }
 
     HRESULT hr = D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED,
                                    &factory_);
@@ -131,6 +156,7 @@ bool TermRenderer::Initialize(HWND hwnd) {
         Shutdown();
         return false;
     }
+
     hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED,
                              __uuidof(IDWriteFactory),
                              reinterpret_cast<IUnknown**>(&writeFactory_));
@@ -151,6 +177,13 @@ bool TermRenderer::Initialize(HWND hwnd) {
                               D2D1_ALPHA_MODE_IGNORE)),
         D2D1::HwndRenderTargetProperties(hwnd, D2D1::SizeU(width, height)),
         &target_);
+    if (FAILED(hr)) {
+        Shutdown();
+        return false;
+    }
+
+    hr = target_->CreateSolidColorBrush(D2D1::ColorF(0.0f, 0.0f, 0.0f, 1.0f),
+                                        &solidBrush_);
     if (FAILED(hr)) {
         Shutdown();
         return false;
@@ -188,6 +221,11 @@ bool TermRenderer::Initialize(HWND hwnd) {
     bold_ = makeFormat(DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_NORMAL);
     italic_ = makeFormat(DWRITE_FONT_WEIGHT_NORMAL, DWRITE_FONT_STYLE_ITALIC);
     boldItalic_ = makeFormat(DWRITE_FONT_WEIGHT_BOLD, DWRITE_FONT_STYLE_ITALIC);
+    if (!regular_ || !bold_ || !italic_ || !boldItalic_) {
+        if (collection) collection->Release();
+        Shutdown();
+        return false;
+    }
 
     IDWriteFontFamily* fontFamily = nullptr;
     IDWriteFont* font = nullptr;
@@ -243,11 +281,7 @@ bool TermRenderer::Initialize(HWND hwnd) {
 }
 
 void TermRenderer::Shutdown() {
-    for (auto& [key, brush] : brushes_) {
-        (void)key;
-        if (brush) brush->Release();
-    }
-    brushes_.clear();
+    if (solidBrush_) { solidBrush_->Release(); solidBrush_ = nullptr; }
     if (regular_) { regular_->Release(); regular_ = nullptr; }
     if (bold_) { bold_->Release(); bold_ = nullptr; }
     if (italic_) { italic_->Release(); italic_ = nullptr; }
@@ -281,24 +315,50 @@ int TermRenderer::ColsForWidth(int width) const {
     return std::max(1, static_cast<int>(std::floor(width / cellWidth_)));
 }
 
-ID2D1SolidColorBrush* TermRenderer::Brush(uint8_t r, uint8_t g, uint8_t b) {
-    BrushKey key{r, g, b};
-    auto it = brushes_.find(key);
-    if (it != brushes_.end()) return it->second;
-    ID2D1SolidColorBrush* brush = nullptr;
-    if (FAILED(target_->CreateSolidColorBrush(
-            D2D1::ColorF(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f),
-            &brush))) {
-        return nullptr;
-    }
-    brushes_[key] = brush;
-    return brush;
+dc::terminal::SelectionPoint TermRenderer::CellAtPoint(
+    POINT point, int topOffset, int rows, int cols) const {
+    dc::terminal::SelectionPoint result{};
+    if (rows <= 0 || cols <= 0 || !target_) return result;
+
+    RECT client{};
+    GetClientRect(target_->GetHwnd(), &client);
+    const int width = std::max(1L, client.right - client.left);
+    const int height = std::max(1L, client.bottom - client.top);
+    topOffset = std::clamp(topOffset, 0, height);
+
+    const std::vector<int> xEdges = CellEdges(0, cols, cellWidth_, width);
+    const std::vector<int> yEdges =
+        CellEdges(topOffset, rows, cellHeight_, height);
+    const int x = std::clamp(static_cast<int>(point.x), 0, width - 1);
+    const int y = std::clamp(static_cast<int>(point.y), topOffset,
+                             std::max(topOffset, height - 1));
+
+    result.col = std::clamp(
+        static_cast<int>(std::upper_bound(xEdges.begin(), xEdges.end(), x) -
+                         xEdges.begin()) -
+            1,
+        0, cols - 1);
+    result.row = std::clamp(
+        static_cast<int>(std::upper_bound(yEdges.begin(), yEdges.end(), y) -
+                         yEdges.begin()) -
+            1,
+        0, rows - 1);
+    return result;
 }
 
-void TermRenderer::DrawCellText(int row, int col, int runWidth, float topOffset,
+ID2D1SolidColorBrush* TermRenderer::SetBrushColor(uint8_t r, uint8_t g,
+                                                 uint8_t b) {
+    if (!solidBrush_) return nullptr;
+    solidBrush_->SetColor(
+        D2D1::ColorF(r / 255.0f, g / 255.0f, b / 255.0f, 1.0f));
+    return solidBrush_;
+}
+
+void TermRenderer::DrawCellText(int left, int top, int right, int bottom,
+                                int viewportRight, int viewportBottom,
                                 const std::wstring& text, bool bold, bool italic,
-                                uint8_t underline, bool strike,
-                                const D2D1_COLOR_F& fg) {
+                                uint8_t underline, bool strike, uint8_t r,
+                                uint8_t g, uint8_t b) {
     if (text.empty()) return;
     IDWriteTextFormat* format = regular_;
     if (bold && italic) format = boldItalic_;
@@ -306,52 +366,151 @@ void TermRenderer::DrawCellText(int row, int col, int runWidth, float topOffset,
     else if (italic) format = italic_;
     if (!format) return;
 
-    ID2D1SolidColorBrush* brush = Brush(
-        static_cast<uint8_t>(fg.r * 255.0f), static_cast<uint8_t>(fg.g * 255.0f),
-        static_cast<uint8_t>(fg.b * 255.0f));
+    ID2D1SolidColorBrush* brush = SetBrushColor(r, g, b);
     if (!brush) return;
 
-    const float x = static_cast<float>(col * cellWidth_);
-    const float y = topOffset + static_cast<float>(row) * cellHeight_;
-    const float textWidth = static_cast<float>(runWidth) * cellWidth_;
-
+    // The terminal viewport supplies the only ink clip. Giving each grapheme
+    // the remainder of that viewport prevents DirectWrite from cutting italic,
+    // fallback, wide, or combining glyph ink at a style-run boundary.
     target_->DrawText(text.c_str(), static_cast<UINT32>(text.size()), format,
-                      D2D1::RectF(x, y, x + textWidth, y + cellHeight_),
-                      brush, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+                      D2D1::RectF(static_cast<float>(left),
+                                  static_cast<float>(top),
+                                  static_cast<float>(viewportRight),
+                                  static_cast<float>(viewportBottom)),
+                      brush, D2D1_DRAW_TEXT_OPTIONS_NONE);
 
-    if (underline != VTERM_UNDERLINE_OFF && brush) {
-        const float lineHeight = std::max(1.0f, cellHeight_ / 14.0f);
-        target_->FillRectangle(
-            PixelAlignedRect(x, y + baselineOffset_ + lineHeight * 0.5f,
-                             x + textWidth,
-                             y + baselineOffset_ + lineHeight * 1.5f),
-            brush);
-        if (underline == VTERM_UNDERLINE_DOUBLE) {
+    DrawCellDecorations(left, top, right, bottom, underline, strike, brush);
+}
+
+void TermRenderer::DrawCellDecorations(int left, int top, int right, int bottom,
+                                       uint8_t underline, bool strike,
+                                       ID2D1SolidColorBrush* brush) {
+    if (!brush || left >= right || top >= bottom) return;
+
+    const int cellHeight = bottom - top;
+    const int lineHeight =
+        std::max(1, static_cast<int>(std::lround(cellHeight / 14.0)));
+    auto fillLine = [&](int lineTop) {
+        lineTop = std::clamp(lineTop, top, bottom);
+        const int lineBottom = std::min(bottom, lineTop + lineHeight);
+        if (lineTop < lineBottom) {
             target_->FillRectangle(
-                PixelAlignedRect(x, y + baselineOffset_ + lineHeight * 2.0f,
-                                 x + textWidth,
-                                 y + baselineOffset_ + lineHeight * 3.0f),
+                D2D1::RectF(static_cast<float>(left),
+                            static_cast<float>(lineTop),
+                            static_cast<float>(right),
+                            static_cast<float>(lineBottom)),
                 brush);
         }
+    };
+
+    if (underline != VTERM_UNDERLINE_OFF) {
+        const int firstUnderline =
+            top + static_cast<int>(std::lround(baselineOffset_)) +
+            std::max(1, lineHeight / 2);
+        fillLine(firstUnderline);
+        if (underline == VTERM_UNDERLINE_DOUBLE) {
+            fillLine(firstUnderline + lineHeight * 2);
+        }
     }
-    if (strike && brush) {
-        const float lineHeight = std::max(1.0f, cellHeight_ / 14.0f);
-        const float strikeY = y + baselineOffset_ * 0.62f;
-        target_->FillRectangle(
-            PixelAlignedRect(x, strikeY, x + textWidth, strikeY + lineHeight),
-            brush);
+    if (strike) {
+        fillLine(top + static_cast<int>(std::lround(baselineOffset_ * 0.62f)));
     }
 }
 
-void TermRenderer::DrawCursor(int row, int col, float topOffset) {
-    if (row < 0 || col < 0) return;
-    const float x = static_cast<float>(col) * cellWidth_;
-    const float y = topOffset + static_cast<float>(row) * cellHeight_;
-    ID2D1SolidColorBrush* brush = Brush(kDefaultFg[0], kDefaultFg[1], kDefaultFg[2]);
+bool TermRenderer::DrawBlockElement(uint32_t codepoint, int left, int top,
+                                    int right, int bottom,
+                                    ID2D1SolidColorBrush* brush) {
+    if (codepoint < 0x2580 || codepoint > 0x259F) return false;
+    if (!brush || left >= right || top >= bottom) return true;
+
+    auto fill = [&](int fillLeft, int fillTop, int fillRight, int fillBottom) {
+        fillLeft = std::clamp(fillLeft, left, right);
+        fillRight = std::clamp(fillRight, left, right);
+        fillTop = std::clamp(fillTop, top, bottom);
+        fillBottom = std::clamp(fillBottom, top, bottom);
+        if (fillLeft >= fillRight || fillTop >= fillBottom) return;
+        target_->FillRectangle(
+            D2D1::RectF(static_cast<float>(fillLeft),
+                        static_cast<float>(fillTop),
+                        static_cast<float>(fillRight),
+                        static_cast<float>(fillBottom)),
+            brush);
+    };
+
+    if (codepoint == 0x2580) {
+        fill(left, top, right, FractionEdge(top, bottom, 1, 2));
+        return true;
+    }
+    if (codepoint >= 0x2581 && codepoint <= 0x2588) {
+        const int eighths = static_cast<int>(codepoint - 0x2580);
+        fill(left, FractionEdge(top, bottom, 8 - eighths, 8), right, bottom);
+        return true;
+    }
+    if (codepoint >= 0x2589 && codepoint <= 0x258F) {
+        const int eighths = static_cast<int>(0x2590 - codepoint);
+        fill(left, top, FractionEdge(left, right, eighths, 8), bottom);
+        return true;
+    }
+
+    switch (codepoint) {
+        case 0x2590:
+            fill(FractionEdge(left, right, 1, 2), top, right, bottom);
+            return true;
+        case 0x2591:
+        case 0x2592:
+        case 0x2593: {
+            const int coverage = static_cast<int>(codepoint - 0x2590);
+            constexpr int bayer2x2[2][2] = {{0, 2}, {3, 1}};
+            for (int y = top; y < bottom; ++y) {
+                for (int x = left; x < right; ++x) {
+                    if (bayer2x2[y & 1][x & 1] < coverage) {
+                        fill(x, y, x + 1, y + 1);
+                    }
+                }
+            }
+            return true;
+        }
+        case 0x2594:
+            fill(left, top, right, FractionEdge(top, bottom, 1, 8));
+            return true;
+        case 0x2595:
+            fill(FractionEdge(left, right, 7, 8), top, right, bottom);
+            return true;
+        default:
+            break;
+    }
+
+    const int middleX = FractionEdge(left, right, 1, 2);
+    const int middleY = FractionEdge(top, bottom, 1, 2);
+    unsigned int quadrantMask = 0;
+    switch (codepoint) {
+        case 0x2596: quadrantMask = 0x4; break;
+        case 0x2597: quadrantMask = 0x8; break;
+        case 0x2598: quadrantMask = 0x1; break;
+        case 0x2599: quadrantMask = 0xD; break;
+        case 0x259A: quadrantMask = 0x9; break;
+        case 0x259B: quadrantMask = 0x7; break;
+        case 0x259C: quadrantMask = 0xB; break;
+        case 0x259D: quadrantMask = 0x2; break;
+        case 0x259E: quadrantMask = 0x6; break;
+        case 0x259F: quadrantMask = 0xE; break;
+        default: return true;
+    }
+    if ((quadrantMask & 0x1) != 0) fill(left, top, middleX, middleY);
+    if ((quadrantMask & 0x2) != 0) fill(middleX, top, right, middleY);
+    if ((quadrantMask & 0x4) != 0) fill(left, middleY, middleX, bottom);
+    if ((quadrantMask & 0x8) != 0) fill(middleX, middleY, right, bottom);
+    return true;
+}
+
+void TermRenderer::DrawCursor(int left, int top, int right, int bottom) {
+    if (left >= right || top >= bottom) return;
+    ID2D1SolidColorBrush* brush =
+        SetBrushColor(kDefaultFg[0], kDefaultFg[1], kDefaultFg[2]);
     if (!brush) return;
     target_->FillRectangle(
-        PixelAlignedRect(x, y, x + static_cast<float>(cellWidth_),
-                         y + cellHeight_),
+        D2D1::RectF(static_cast<float>(left), static_cast<float>(top),
+                    static_cast<float>(right), static_cast<float>(bottom)),
         brush);
 }
 
@@ -372,12 +531,14 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
 
     struct RenderRow {
         int row = 0;
-        std::vector<ColorRun> runs;
+        std::vector<BackgroundRun> backgrounds;
+        std::vector<CellGlyph> glyphs;
     };
     std::vector<RenderRow> rowsToRender;
     int cursorRow = -1;
     int cursorCol = -1;
     bool cursorVisible = false;
+    int terminalRows = 0;
     int terminalCols = 0;
 
     {
@@ -393,8 +554,9 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
             return SUCCEEDED(hr);
         }
 
-        const int rows = terminal.Rows();
-        const int cols = terminal.Cols();
+        const int rows = terminal.RowsLocked();
+        const int cols = terminal.ColsLocked();
+        terminalRows = rows;
         terminalCols = cols;
         const auto& scrollback = terminal.Scrollback();
         const int scrollbackLines = static_cast<int>(scrollback.size());
@@ -402,78 +564,87 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
                                       scrollbackLines);
         const int firstVirtualRow = scrollbackLines - offset;
 
-        auto collectRow = [&](int row, int lineCols,
+        auto collectRow = [&](int screenRow, int lineCols,
                               const VTermScreenCell* lineCells,
-                              std::vector<ColorRun>& out) {
-            out.clear();
-            ColorRun current;
-            bool hasCurrent = false;
-            const int cellCount =
-                lineCells ? lineCols : (row < rows ? cols : 0);
-            for (int col = 0; col < cellCount; ++col) {
+                              bool scrollbackRow, RenderRow& out) {
+            out.backgrounds.clear();
+            out.glyphs.clear();
+            BackgroundRun currentBackground;
+            bool hasBackground = false;
+            for (int col = 0; col < cols; ++col) {
                 VTermScreenCell cell{};
-                if (lineCells) {
+                bool haveCell = false;
+                if (scrollbackRow && lineCells && col < lineCols) {
                     cell = lineCells[col];
+                    haveCell = true;
+                } else if (!scrollbackRow && screenRow >= 0 &&
+                           screenRow < rows) {
+                    VTermPos pos{screenRow, col};
+                    haveCell = vterm_screen_get_cell(screen, pos, &cell) != 0;
+                }
+
+                const ResolvedCell resolved =
+                    haveCell ? ResolveCell(screen, cell) : DefaultCell();
+                if (!hasBackground ||
+                    !(resolved.background == currentBackground.color)) {
+                    if (hasBackground) {
+                        out.backgrounds.push_back(currentBackground);
+                    }
+                    currentBackground = {col, col + 1, resolved.background};
+                    hasBackground = true;
                 } else {
-                    VTermPos pos{row, col};
-                    if (!vterm_screen_get_cell(screen, pos, &cell)) continue;
+                    currentBackground.endCol = col + 1;
                 }
 
-                const ResolvedCell resolved = ResolveCell(screen, cell);
-                if (!hasCurrent || !SameRun(resolved, current)) {
-                    if (hasCurrent &&
-                        (!current.text.empty() || current.hasBackground)) {
-                        out.push_back(std::move(current));
-                    }
-                    current = ColorRun{};
-                    current.startCol = col;
-                    current.endCol = col;
-                    current.bold = resolved.bold;
-                    current.italic = resolved.italic;
-                    current.underline = resolved.underline;
-                    current.strike = resolved.strike;
-                    current.hasBackground = resolved.hasBackground;
-                    current.r = resolved.r;
-                    current.g = resolved.g;
-                    current.b = resolved.b;
-                    current.br = resolved.br;
-                    current.bg = resolved.bg;
-                    current.bb = resolved.bb;
-                    hasCurrent = true;
+                if (!haveCell || cell.attrs.conceal != 0 ||
+                    cell.chars[0] == 0 || cell.chars[0] == UINT32_MAX) {
+                    continue;
                 }
 
-                current.endCol = std::max(
-                    current.endCol, col + std::max(1, static_cast<int>(cell.width)));
-                if (cell.attrs.conceal == 0) {
-                    for (int ch = 0; ch < VTERM_MAX_CHARS_PER_CELL; ++ch) {
-                        if (cell.chars[ch] == 0) break;
-                        AppendCodePoint(current.text, cell.chars[ch]);
+                CellGlyph glyph;
+                glyph.col = col;
+                glyph.width = std::clamp(
+                    std::max(1, static_cast<int>(cell.width)), 1, cols - col);
+                glyph.bold = resolved.bold;
+                glyph.italic = resolved.italic;
+                glyph.underline = resolved.underline;
+                glyph.strike = resolved.strike;
+                glyph.foreground = resolved.foreground;
+                for (int ch = 0; ch < VTERM_MAX_CHARS_PER_CELL; ++ch) {
+                    const uint32_t codepoint = cell.chars[ch];
+                    if (codepoint == 0) break;
+                    if (codepoint == UINT32_MAX || codepoint > 0x10FFFF) {
+                        continue;
                     }
+                    if (glyph.codepointCount == 0) {
+                        glyph.primaryCodepoint = codepoint;
+                    }
+                    ++glyph.codepointCount;
+                    AppendCodePoint(glyph.text, codepoint);
                 }
+                if (!glyph.text.empty()) out.glyphs.push_back(std::move(glyph));
             }
-            if (hasCurrent &&
-                (!current.text.empty() || current.hasBackground)) {
-                out.push_back(std::move(current));
+            if (hasBackground) {
+                out.backgrounds.push_back(currentBackground);
             }
         };
 
-        std::vector<ColorRun> runs;
-
         for (int viewportRow = 0; viewportRow < rows; ++viewportRow) {
+            RenderRow renderedRow;
+            renderedRow.row = viewportRow;
             const int virtualRow = firstVirtualRow + viewportRow;
             if (virtualRow >= 0 && virtualRow < scrollbackLines) {
                 const auto& line = scrollback[virtualRow];
                 collectRow(viewportRow, static_cast<int>(line.cells.size()),
-                           line.cells.data(), runs);
+                           line.cells.data(), true, renderedRow);
             } else if (virtualRow >= scrollbackLines &&
                        virtualRow < scrollbackLines + rows) {
-                collectRow(virtualRow - scrollbackLines, 0, nullptr, runs);
+                collectRow(virtualRow - scrollbackLines, 0, nullptr, false,
+                           renderedRow);
             } else {
-                runs.clear();
+                collectRow(-1, 0, nullptr, true, renderedRow);
             }
-            rowsToRender.push_back(
-                RenderRow{viewportRow, std::move(runs)});
-            runs.clear();
+            rowsToRender.push_back(std::move(renderedRow));
         }
 
         cursorRow = scrollbackLines + terminal.CursorRow() - firstVirtualRow;
@@ -483,30 +654,49 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
                         cursorCol >= 0 && cursorCol < cols;
     }
 
+    const std::vector<int> xEdges = CellEdges(
+        0, terminalCols, cellWidth_, static_cast<int>(width));
+    const std::vector<int> yEdges = CellEdges(
+        topOffset, terminalRows, cellHeight_, static_cast<int>(height));
+    const int viewportRight = xEdges.empty() ? 0 : xEdges.back();
+    const int viewportBottom = yEdges.empty() ? topOffset : yEdges.back();
+
     target_->BeginDraw();
     target_->Clear(D2D1::ColorF(kDefaultBg[0] / 255.0f, kDefaultBg[1] / 255.0f,
                                 kDefaultBg[2] / 255.0f, 1.0f));
-    target_->PushAxisAlignedClip(
-        D2D1::RectF(0.0f, static_cast<float>(topOffset),
-                    static_cast<float>(width), static_cast<float>(height)),
-        D2D1_ANTIALIAS_MODE_ALIASED);
+    const bool hasViewport = terminalCols > 0 && terminalRows > 0 &&
+                             viewportRight > 0 && viewportBottom > topOffset;
+    if (hasViewport) {
+        target_->PushAxisAlignedClip(
+            D2D1::RectF(0.0f, static_cast<float>(topOffset),
+                        static_cast<float>(viewportRight),
+                        static_cast<float>(viewportBottom)),
+            D2D1_ANTIALIAS_MODE_ALIASED);
+    }
 
-    auto renderRow = [&](int screenRow, const std::vector<ColorRun>& runs) {
-        const float y = static_cast<float>(topOffset) +
-                        static_cast<float>(screenRow) * cellHeight_;
+    auto renderRow = [&](const RenderRow& row) {
+        const int screenRow = row.row;
+        if (!hasViewport || screenRow < 0 || screenRow >= terminalRows) return;
+        const int top = yEdges[static_cast<size_t>(screenRow)];
+        const int bottom = yEdges[static_cast<size_t>(screenRow + 1)];
 
-        for (const ColorRun& run : runs) {
-            const float x = static_cast<float>(run.startCol) * cellWidth_;
-            const float w = static_cast<float>(run.endCol - run.startCol) * cellWidth_;
-            if (run.hasBackground &&
-                (run.br != kDefaultBg[0] || run.bg != kDefaultBg[1] ||
-                 run.bb != kDefaultBg[2])) {
-                ID2D1SolidColorBrush* bgBrush = Brush(run.br, run.bg, run.bb);
-                if (bgBrush) {
-                    target_->FillRectangle(
-                        PixelAlignedRect(x, y, x + w, y + cellHeight_),
-                        bgBrush);
-                }
+        for (const BackgroundRun& run : row.backgrounds) {
+            const int startCol = std::clamp(run.startCol, 0, terminalCols);
+            const int endCol = std::clamp(run.endCol, startCol, terminalCols);
+            if (startCol == endCol || run.color == ThemeColor(kDefaultBg)) {
+                continue;
+            }
+            ID2D1SolidColorBrush* bgBrush =
+                SetBrushColor(run.color.r, run.color.g, run.color.b);
+            if (bgBrush) {
+                const int left = xEdges[static_cast<size_t>(startCol)];
+                const int right = xEdges[static_cast<size_t>(endCol)];
+                target_->FillRectangle(
+                    D2D1::RectF(static_cast<float>(left),
+                                static_cast<float>(top),
+                                static_cast<float>(right),
+                                static_cast<float>(bottom)),
+                    bgBrush);
             }
         }
 
@@ -516,40 +706,99 @@ bool TermRenderer::Render(dc::terminal::Terminal& terminal, int topOffset,
             if (selection->BoundsForRow(screenRow, terminalCols,
                                         selectionStart, selectionEnd)) {
                 ID2D1SolidColorBrush* selectionBrush =
-                    Brush(56, 103, 181);
+                    SetBrushColor(56, 103, 181);
                 if (selectionBrush) {
-                    const float x =
-                        static_cast<float>(selectionStart) * cellWidth_;
-                    const float endX =
-                        static_cast<float>(selectionEnd) * cellWidth_;
+                    selectionStart =
+                        std::clamp(selectionStart, 0, terminalCols);
+                    selectionEnd =
+                        std::clamp(selectionEnd, selectionStart, terminalCols);
                     target_->FillRectangle(
-                        PixelAlignedRect(x, y, endX, y + cellHeight_),
+                        D2D1::RectF(
+                            static_cast<float>(xEdges[static_cast<size_t>(
+                                selectionStart)]),
+                            static_cast<float>(top),
+                            static_cast<float>(xEdges[static_cast<size_t>(
+                                selectionEnd)]),
+                            static_cast<float>(bottom)),
                         selectionBrush);
                 }
             }
         }
 
-        for (const ColorRun& run : runs) {
-            if (!run.text.empty()) {
-                DrawCellText(screenRow, run.startCol, run.endCol - run.startCol,
-                             static_cast<float>(topOffset),
-                             run.text, run.bold, run.italic, run.underline,
-                             run.strike,
-                             D2D1::ColorF(run.r / 255.0f, run.g / 255.0f,
-                                          run.b / 255.0f, 1.0f));
+        for (size_t glyphIndex = 0; glyphIndex < row.glyphs.size();) {
+            const CellGlyph& glyph = row.glyphs[glyphIndex];
+            const int startCol = std::clamp(glyph.col, 0, terminalCols);
+            const int endCol = std::clamp(glyph.col + glyph.width,
+                                          startCol, terminalCols);
+            if (startCol == endCol || glyph.text.empty()) {
+                ++glyphIndex;
+                continue;
             }
+
+            if (IsOrdinaryBatchableGlyph(glyph)) {
+                std::wstring text = glyph.text;
+                int runEndCol = glyph.col + 1;
+                size_t runEnd = glyphIndex + 1;
+                while (runEnd < row.glyphs.size()) {
+                    const CellGlyph& next = row.glyphs[runEnd];
+                    if (!IsOrdinaryBatchableGlyph(next) ||
+                        next.col != runEndCol ||
+                        !HasMatchingTextStyle(glyph, next)) {
+                        break;
+                    }
+                    text.append(next.text);
+                    ++runEndCol;
+                    ++runEnd;
+                }
+
+                const int boundedRunEndCol =
+                    std::clamp(runEndCol, startCol, terminalCols);
+                DrawCellText(
+                    xEdges[static_cast<size_t>(startCol)], top,
+                    xEdges[static_cast<size_t>(boundedRunEndCol)], bottom,
+                    viewportRight, viewportBottom, text, glyph.bold,
+                    glyph.italic, glyph.underline, glyph.strike,
+                    glyph.foreground.r, glyph.foreground.g,
+                    glyph.foreground.b);
+                glyphIndex = runEnd;
+                continue;
+            }
+
+            const int left = xEdges[static_cast<size_t>(startCol)];
+            const int right = xEdges[static_cast<size_t>(endCol)];
+            ID2D1SolidColorBrush* brush = SetBrushColor(
+                glyph.foreground.r, glyph.foreground.g, glyph.foreground.b);
+            const bool blockDrawn =
+                glyph.codepointCount == 1 &&
+                DrawBlockElement(glyph.primaryCodepoint, left, top, right,
+                                 bottom, brush);
+            if (blockDrawn) {
+                DrawCellDecorations(left, top, right, bottom, glyph.underline,
+                                    glyph.strike, brush);
+            } else {
+                DrawCellText(left, top, right, bottom, viewportRight,
+                             viewportBottom, glyph.text, glyph.bold,
+                             glyph.italic, glyph.underline, glyph.strike,
+                             glyph.foreground.r, glyph.foreground.g,
+                             glyph.foreground.b);
+            }
+            ++glyphIndex;
         }
     };
 
     for (const RenderRow& row : rowsToRender) {
-        renderRow(row.row, row.runs);
+        renderRow(row);
     }
 
-    if (cursorVisible) {
-        DrawCursor(cursorRow, cursorCol, static_cast<float>(topOffset));
+    if (hasViewport && cursorVisible && cursorRow >= 0 &&
+        cursorRow < terminalRows && cursorCol >= 0 && cursorCol < terminalCols) {
+        DrawCursor(xEdges[static_cast<size_t>(cursorCol)],
+                   yEdges[static_cast<size_t>(cursorRow)],
+                   xEdges[static_cast<size_t>(cursorCol + 1)],
+                   yEdges[static_cast<size_t>(cursorRow + 1)]);
     }
 
-    target_->PopAxisAlignedClip();
+    if (hasViewport) target_->PopAxisAlignedClip();
 
     HRESULT hr = target_->EndDraw();
     if (hr == D2DERR_RECREATE_TARGET) return false;

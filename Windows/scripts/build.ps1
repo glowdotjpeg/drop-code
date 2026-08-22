@@ -6,6 +6,11 @@ param(
     [ValidateSet("Debug", "Release", "RelWithDebInfo")]
     [string]$Config = "Release",
 
+    [ValidatePattern('^\d+\.\d+\.\d+$')]
+    [string]$Version = "0.3.0",
+
+    [switch]$RunTests,
+
     [string]$BuildDir
 )
 
@@ -30,6 +35,10 @@ if ($VsWhere) {
 if (-not $VsPath) {
     throw "Visual Studio with the C++ toolchain was not found. Install the Desktop development with C++ workload."
 }
+if ($VsWhere) {
+    $vsInstallerDirectory = Split-Path -Parent $VsWhere
+    $env:PATH = "$vsInstallerDirectory;$env:PATH"
+}
 
 $Vcvars = Join-Path $VsPath "VC\Auxiliary\Build\vcvarsall.bat"
 if (-not (Test-Path -LiteralPath $Vcvars)) {
@@ -51,9 +60,18 @@ if (-not (Test-Path -LiteralPath $NinjaPath)) { throw "ninja.exe was not found."
 
 New-Item -ItemType Directory -Force -Path $BuildDir | Out-Null
 
-$command = "`"$Vcvars`" $Architecture && `"$CmakePath`" -S `"$Root`" -B `"$BuildDir`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DCMAKE_MAKE_PROGRAM=`"$NinjaPath`" && `"$CmakePath`" --build `"$BuildDir`""
+$command = "`"$Vcvars`" $Architecture && `"$CmakePath`" -S `"$Root`" -B `"$BuildDir`" -G Ninja -DCMAKE_BUILD_TYPE=$Config -DDROPCODE_VERSION=$Version -DCMAKE_MAKE_PROGRAM=`"$NinjaPath`" && `"$CmakePath`" --build `"$BuildDir`""
 & cmd.exe /d /s /c $command
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+if ($RunTests) {
+    $CtestPath = Join-Path (Split-Path -Parent $CmakePath) "ctest.exe"
+    if (-not (Test-Path -LiteralPath $CtestPath)) {
+        throw "ctest.exe was not found next to $CmakePath"
+    }
+    & $CtestPath --test-dir $BuildDir --output-on-failure
+    if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+}
 
 $Exe = Join-Path $BuildDir "DropCode.exe"
 Write-Host "Built: $Exe"
